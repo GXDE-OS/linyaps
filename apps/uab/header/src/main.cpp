@@ -4,13 +4,13 @@
 
 #include "linglong/api/types/v1/Generators.hpp"
 #include "linglong/api/types/v1/UabMetaInfo.hpp"
+#include "sha256.h"
 
 #include <gelf.h>
 #include <getopt.h>
 #include <libelf.h>
 #include <linux/limits.h>
 #include <nlohmann/json.hpp>
-#include <openssl/evp.h>
 #include <sys/mount.h>
 
 #include <algorithm>
@@ -282,21 +282,11 @@ std::string calculateDigest(int fd, std::size_t bundleOffset, std::size_t bundle
         return {};
     }
 
-    auto ctxDeleter = [](EVP_MD_CTX *self) {
-        EVP_MD_CTX_free(self);
-    };
-    auto ctx =
-      std::unique_ptr<EVP_MD_CTX, decltype(ctxDeleter)>(EVP_MD_CTX_new(), std::move(ctxDeleter));
-    if (EVP_DigestInit_ex(ctx.get(), EVP_sha256(), nullptr) == 0) {
-        std::cerr << "init digest context error" << std::endl;
-        return {};
-    }
-
-    std::array<unsigned char, 4096> buf{};
-    std::array<unsigned char, EVP_MAX_MD_SIZE> md_value{};
+    digest::SHA256 sha256;
+    std::array<std::byte, 4096> buf{};
+    std::array<std::byte, 32> md_value{};
     auto expectedRead = buf.size();
     int readLength{ 0 };
-    unsigned int digestLength{ 0 };
 
     while ((readLength = ::read(file, buf.data(), expectedRead)) != 0) {
         if (readLength == -1) {
@@ -308,19 +298,12 @@ std::string calculateDigest(int fd, std::size_t bundleOffset, std::size_t bundle
             return {};
         }
 
-        if (EVP_DigestUpdate(ctx.get(), buf.data(), readLength) == 0) {
-            std::cerr << "update digest error" << std::endl;
-            return {};
-        }
+        sha256.update(buf.data(), readLength);
 
         bundleLength -= readLength;
         if (bundleLength == 0) {
-            if (EVP_DigestFinal(ctx.get(), md_value.data(), &digestLength) == 1) {
-                break;
-            }
-
-            std::cerr << "get digest error" << std::endl;
-            return {};
+            sha256.final(md_value.data());
+            break;
         }
 
         expectedRead = bundleLength > buf.size() ? buf.size() : bundleLength;
@@ -329,8 +312,8 @@ std::string calculateDigest(int fd, std::size_t bundleOffset, std::size_t bundle
     std::stringstream stream;
     stream << std::setfill('0') << std::hex;
 
-    for (auto i = 0U; i < digestLength; i++) {
-        stream << std::setw(2) << static_cast<unsigned int>(md_value.at(i));
+    for (auto v : md_value) {
+        stream << std::setw(2) << static_cast<unsigned int>(v);
     }
 
     return stream.str();
@@ -563,24 +546,8 @@ std::optional<linglong::api::types::v1::UabMetaInfo> getMetaInfo(std::string_vie
 int extractBundle(std::string_view destination) noexcept
 {
     std::error_code ec;
-    auto path = std::filesystem::path(destination);
-    if (!std::filesystem::exists(path.parent_path(), ec) || ec) {
-        std::cerr << path.parent_path() << ": " << ec.message() << std::endl;
-        return ec.value();
-    }
-
-    if (!std::filesystem::create_directory(path, path.parent_path(), ec) || ec) {
-        std::cerr << "create " << path << ":" << ec.message() << std::endl;
-        return ec.value();
-    }
-
-    if (!std::filesystem::is_directory(path, ec) || ec) {
-        std::cerr << "filesystem error:" << path << " " << ec.message() << std::endl;
-        return ec.value();
-    }
-
-    if (!std::filesystem::is_empty(path, ec) || ec) {
-        std::cerr << "filesystem error:" << path << " " << ec.message() << std::endl;
+    if (!std::filesystem::create_directories(destination, ec) && ec) {
+        std::cerr << "failed to create " << destination << ": " << ec.message() << std::endl;
         return ec.value();
     }
 
@@ -784,12 +751,6 @@ int main(int argc, char **argv)
     }
 
     if (!opts.extractPath.empty()) {
-        opts.extractPath = resolveRealPath(opts.extractPath);
-        if (opts.extractPath.empty()) {
-            std::cerr << "couldn't resolve extractPath" << std::endl;
-            return -1;
-        }
-
         if (mountSelf(selfBin, metaInfo) != 0) {
             cleanAndExit(-1);
         }

@@ -940,6 +940,7 @@ set -e
 
     qDebug() << "generate entries";
     if (this->project.package.kind != "runtime") {
+        // 仅导出名单中的目录，以避免意外文件影响系统功能
         const QStringList exportPaths = {
             "share/applications", // Copy desktop files
             "share/mime",         // Copy MIME Type files
@@ -971,18 +972,19 @@ set -e
             if (!binaryFiles.exists(path)) {
                 continue;
             }
-
-            const QString dest = QString("../../files/%1").arg(path);
-
+            // appdata是旧版本的metainfo
             if (path == "share/appdata") {
-                if (!QFile::link(dest, binaryEntries.absoluteFilePath("share/metainfo"))) {
+                auto ret = copyDir(binaryFiles.absoluteFilePath(path),
+                                   binaryEntries.filePath("share/metainfo"));
+                if (!ret.has_value()) {
                     qWarning() << "link binary entries share to files share/" << path << "failed";
                 }
 
                 continue;
             }
-
-            if (!QFile::link(dest, binaryEntries.absoluteFilePath(path))) {
+            auto ret =
+              copyDir(binaryFiles.absoluteFilePath(path), binaryEntries.absoluteFilePath(path));
+            if (!ret.has_value()) {
                 qWarning() << "link binary entries " << path << "to files share: failed";
                 continue;
             }
@@ -1149,11 +1151,18 @@ utils::error::Result<void> Builder::exportUAB(const QString &destination, const 
         packager.include(project.include.value());
     }
 
+    auto baseFuzzyRef = package::FuzzyReference::parse(QString::fromStdString(this->project.base));
+    if (!baseFuzzyRef) {
+        return LINGLONG_ERR(baseFuzzyRef);
+    }
+
     auto baseRef =
-      pullDependency(QString::fromStdString(this->project.base), this->repo, "binary", false);
+      this->repo.clearReference(*baseFuzzyRef,
+                                linglong::repo::clearReferenceOption{ .fallbackToRemote = false });
     if (!baseRef) {
         return LINGLONG_ERR(baseRef);
     }
+
     auto baseDir = this->repo.getLayerDir(*baseRef);
     if (!baseDir) {
         return LINGLONG_ERR(baseDir);
@@ -1161,14 +1170,20 @@ utils::error::Result<void> Builder::exportUAB(const QString &destination, const 
     packager.appendLayer(*baseDir);
 
     if (this->project.runtime) {
-        auto ref = pullDependency(QString::fromStdString(*this->project.runtime),
-                                  this->repo,
-                                  "binary",
-                                  false);
-        if (!ref) {
-            return LINGLONG_ERR(ref);
+        auto runtimeFuzzyRef =
+          package::FuzzyReference::parse(QString::fromStdString(this->project.runtime.value()));
+        if (!runtimeFuzzyRef) {
+            return LINGLONG_ERR(runtimeFuzzyRef);
         }
-        auto runtimeDir = this->repo.getLayerDir(*ref);
+
+        auto runtimeRef = this->repo.clearReference(
+          *runtimeFuzzyRef,
+          linglong::repo::clearReferenceOption{ .fallbackToRemote = false });
+        if (!runtimeRef) {
+            return LINGLONG_ERR(runtimeRef);
+        }
+
+        auto runtimeDir = this->repo.getLayerDir(*runtimeRef);
         if (!runtimeDir) {
             return LINGLONG_ERR(runtimeDir);
         }
@@ -1333,44 +1348,41 @@ utils::error::Result<void> Builder::run(const QStringList &modules,
         .mounts = {},
     };
 
-    auto baseRef = pullDependency(QString::fromStdString(this->project.base),
-                                  this->repo,
-                                  "binary",
-                                  this->buildOptions.skipPullDepend);
+    auto fuzzyBase = package::FuzzyReference::parse(QString::fromStdString(this->project.base));
+    if (!fuzzyBase) {
+        return LINGLONG_ERR(fuzzyBase);
+    }
+    auto baseRef =
+      this->repo.clearReference(*fuzzyBase, { .forceRemote = false, .fallbackToRemote = false });
     if (!baseRef) {
         return LINGLONG_ERR(baseRef);
-    }
-
-    if (this->project.runtime) {
-        auto ref = pullDependency(QString::fromStdString(*this->project.runtime),
-                                  this->repo,
-                                  "binary",
-                                  this->buildOptions.skipPullDepend);
-        if (!ref) {
-            return LINGLONG_ERR(ref);
-        }
-        auto ret = this->repo.mergeModules();
-        if (!ret.has_value()) {
-            return ret;
-        }
-        auto dir =
-          debug ? this->repo.getMergedModuleDir(*ref) : this->repo.getLayerDir(*ref, "binary");
-        if (!dir) {
-            return LINGLONG_ERR(dir);
-        }
-        options.runtimeDir = QDir(dir->absolutePath());
-    } else {
-        auto ret = this->repo.mergeModules();
-        if (!ret.has_value()) {
-            return ret;
-        }
     }
     auto baseDir =
       debug ? this->repo.getMergedModuleDir(*baseRef) : this->repo.getLayerDir(*baseRef, "binary");
     if (!baseDir) {
         return LINGLONG_ERR(baseDir);
     }
-    options.baseDir = QDir(baseDir->absolutePath());
+    options.baseDir = *baseDir;
+
+    if (this->project.runtime) {
+        auto fuzzyRuntime =
+          package::FuzzyReference::parse(QString::fromStdString(this->project.runtime.value()));
+        if (!fuzzyRuntime) {
+            return LINGLONG_ERR(fuzzyRuntime);
+        }
+        auto runtimeRef =
+          this->repo.clearReference(*fuzzyRuntime,
+                                    { .forceRemote = false, .fallbackToRemote = false });
+        if (!runtimeRef) {
+            return LINGLONG_ERR(runtimeRef);
+        }
+        auto runtimeDir = debug ? this->repo.getMergedModuleDir(*runtimeRef)
+                                : this->repo.getLayerDir(*runtimeRef, "binary");
+        if (!runtimeDir) {
+            return LINGLONG_ERR(runtimeDir);
+        }
+        options.runtimeDir = *runtimeDir;
+    }
 
     utils::error::Result<package::LayerDir> curDir;
     // mergedDir 会自动在释放时删除临时目录，所以要用变量保留住

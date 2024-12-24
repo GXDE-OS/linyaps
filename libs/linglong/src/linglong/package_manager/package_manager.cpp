@@ -100,43 +100,50 @@ PackageManager::PackageManager(linglong::repo::OSTreeRepo &repo, QObject *parent
       this,
       &PackageManager::TaskListChanged,
       this,
-      [this](const QString &taskObjectPath) {
+      [this](const QString &taskObjectPath, const QString &taskDescription) {
+          if (taskDescription != "TaskSwitch") {
+              qInfo() << QString("Task %1 added, type is %2.")
+                           .arg(taskObjectPath.section('/', -1), taskDescription);
+          }
           // notify task waiting
           if (!this->runningTaskObjectPath.isEmpty()) {
               for (auto *task : taskList) {
-                  // skip tasks without job
-                  if (!task->getJob().has_value()
-                      || task->taskObjectPath() == runningTaskObjectPath) {
-                      continue;
+                  if (task->getJob().has_value()
+                      && task->state() == linglong::api::types::v1::State::Queued) {
+                      auto msg = QString("Waiting for the other tasks");
+                      task->updateState(linglong::api::types::v1::State::Queued, msg);
                   }
-                  auto msg = QString("Waiting for the other tasks");
-                  task->updateState(linglong::api::types::v1::State::Queued, msg);
               }
               return;
           }
-          // start next task
-          this->runningTaskObjectPath = taskObjectPath;
-          if (this->taskList.empty()) {
-              return;
-          };
-          for (auto it = taskList.begin(); it != taskList.end(); ++it) {
+
+          for (auto it = taskList.begin(); it != taskList.end();) {
               auto *task = *it;
               if (!task->getJob().has_value()
                   || task->state() != linglong::api::types::v1::State::Queued) {
+                  qInfo() << "Remove" << task->taskID()
+                          << "from task queue, it has no job or State is not Queued";
+                  it = this->taskList.erase(it);
                   continue;
               }
+              this->runningTaskObjectPath = task->taskObjectPath();
               // execute the task
+              qInfo() << QString("Task %1 start.").arg(task->taskID());
               auto func = *task->getJob();
               func();
+              qInfo() << QString("Task %1 finished.").arg(task->taskID()) ;
               Q_EMIT TaskRemoved(QDBusObjectPath{ task->taskObjectPath() },
                                  static_cast<int>(task->state()),
                                  static_cast<int>(task->subState()),
                                  task->message(),
                                  task->getPercentage());
               this->runningTaskObjectPath = "";
-              this->taskList.erase(it);
+              it = this->taskList.erase(it);
               task->deleteLater();
-              Q_EMIT this->TaskListChanged("");
+              if (it != taskList.end()) {
+                  qInfo() << "Switch to next available task";
+                  Q_EMIT this->TaskListChanged("", "TaskSwitch");
+              }
               return;
           }
       },
@@ -602,9 +609,15 @@ QVariantMap PackageManager::installFromLayer(const QDBusUnixFileDescriptor &fd,
         if (packageRef.version > localRef->version) {
             msgType = api::types::v1::InteractionMessageType::Upgrade;
         } else if (!options.force) {
-            return toDBusReply(-1,
-                               "The latest version has been installed. If you need to "
-                               "overwrite it, try using '--force'");
+            auto layerName = QString("%1_%2_%3_%4.layer")
+                               .arg(packageRef.id)
+                               .arg(packageRef.version.toString())
+                               .arg(architectureRet->toString())
+                               .arg(packageInfo.packageInfoV2Module.c_str());
+            auto err = QString("The latest version has been installed. If you want to "
+                               "replace it, try using 'll-cli install %1 --force'")
+                         .arg(layerName);
+            return toDBusReply(-1, err);
         }
     }
 
@@ -748,7 +761,7 @@ QVariantMap PackageManager::installFromLayer(const QDBusUnixFileDescriptor &fd,
     taskRef.setJob(std::move(installer));
 
     Q_EMIT TaskAdded(QDBusObjectPath{ taskRef.taskObjectPath() });
-    Q_EMIT TaskListChanged(taskRef.taskObjectPath());
+    Q_EMIT TaskListChanged(taskRef.taskObjectPath(), "InstallLayer");
     return utils::serialize::toQVariantMap(api::types::v1::PackageManager1PackageTaskResult{
       .taskObjectPath = taskRef.taskObjectPath().toStdString(),
       .code = 0,
@@ -852,9 +865,15 @@ QVariantMap PackageManager::installFromUAB(const QDBusUnixFileDescriptor &fd,
         if (appRef.version > localAppRef->version) {
             msgType = api::types::v1::InteractionMessageType::Upgrade;
         } else if (!options.force) {
-            return toDBusReply(-1,
-                               "The latest version has been installed. If you need to "
-                               "overwrite it, try using '--force'");
+            auto uabName =
+              QString{ "%1_%2_%3_%4.uab" }.arg(appRef.id,
+                                               architectureRet->toString(),
+                                               appRef.version.toString(),
+                                               appLayer.info.packageInfoV2Module.c_str());
+            auto err = QString("The latest version has been installed. If you want to "
+                               "replace it, try using 'll-cli install %1 --force'")
+                         .arg(uabName);
+            return toDBusReply(-1, err);
         }
     }
 
@@ -1057,7 +1076,7 @@ QVariantMap PackageManager::installFromUAB(const QDBusUnixFileDescriptor &fd,
     };
 
     taskRef.setJob(std::move(installer));
-    Q_EMIT TaskListChanged(taskRef.taskObjectPath());
+    Q_EMIT TaskListChanged(taskRef.taskObjectPath(), "InstallUAB");
     return utils::serialize::toQVariantMap(api::types::v1::PackageManager1PackageTaskResult{
       .taskObjectPath = taskRef.taskObjectPath().toStdString(),
       .code = 0,
@@ -1162,9 +1181,11 @@ auto PackageManager::Install(const QVariantMap &parameters) noexcept -> QVariant
         if (remoteRef.version > localRef->version) {
             msgType = api::types::v1::InteractionMessageType::Upgrade;
         } else if (!paras->options.force) {
-            return toDBusReply(-1,
-                               "The latest version has been installed. If you need to "
-                               "overwrite it, try using '--force'.");
+            auto err = QString("The latest version has been installed. If you want to "
+                               "replace it, try using 'll-cli install %1/%2 --force'")
+                         .arg(remoteRef.id)
+                         .arg(remoteRef.version.toString());
+            return toDBusReply(-1, err);
         }
     }
 
@@ -1229,7 +1250,7 @@ auto PackageManager::Install(const QVariantMap &parameters) noexcept -> QVariant
     });
 
     // notify task list change
-    Q_EMIT TaskListChanged(taskRef.taskObjectPath());
+    Q_EMIT TaskListChanged(taskRef.taskObjectPath(), "Install");
     qDebug() << "current task queue size:" << this->taskList.size();
 
     return utils::serialize::toQVariantMap(api::types::v1::PackageManager1PackageTaskResult{
@@ -1478,7 +1499,7 @@ auto PackageManager::Uninstall(const QVariantMap &parameters) noexcept -> QVaria
         this->Uninstall(taskRef, reference, curModule);
     });
     // notify task list change
-    Q_EMIT TaskListChanged(taskRef.taskObjectPath());
+    Q_EMIT TaskListChanged(taskRef.taskObjectPath(), "Uninstall");
     qDebug() << "current task queue size:" << this->taskList.size();
     taskPtr->updateState(api::types::v1::State::Queued, "add uninstall task to task queue.");
     return utils::serialize::toQVariantMap(api::types::v1::PackageManager1PackageTaskResult{
@@ -1671,7 +1692,7 @@ auto PackageManager::Update(const QVariantMap &parameters) noexcept -> QVariantM
             this->Update(taskRef, oldRef, newRef);
         }
     });
-    Q_EMIT TaskListChanged(taskRef.taskObjectPath());
+    Q_EMIT TaskListChanged(taskRef.taskObjectPath(), "Update");
     return utils::serialize::toQVariantMap(api::types::v1::PackageManager1PackageTaskResult{
       .taskObjectPath = taskRef.taskObjectPath().toStdString(),
       .code = 0,
@@ -1695,10 +1716,13 @@ void PackageManager::Update(PackageTask &taskContext,
     taskContext.updateState(linglong::api::types::v1::State::PartCompleted,
                             "Upgrade " + ref.toString() + " to " + newRef.toString() + " success");
 
-    // use setMessage and setSubState directly will not trigger signal
-    taskContext.setSubState(linglong::api::types::v1::SubState::PackageManagerDone),
-      taskContext.setMessage(
-        "Please restart the application after saving the data to experience the new version.");
+    auto ret = this->isRefBusy(ref);
+    if (ret.has_value() && *ret == true) {
+        // use setMessage and setSubState directly will not trigger signal
+        taskContext.setSubState(linglong::api::types::v1::SubState::PackageManagerDone),
+          taskContext.setMessage(
+            "Please restart the application after saving the data to experience the new version.");
+    }
 
     // we don't need to set task state to failed after install newer version successfully
     auto newItem = this->repo.getLayerItem(newRef);

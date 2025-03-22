@@ -16,11 +16,14 @@
 
 namespace linglong::builder {
 
-struct UABOption
+struct ExportOption
 {
-    QString iconPath;
+    std::string iconPath;
+    std::string loader;
+    std::string compressor;
     bool exportDevelop{ false };
     bool exportI18n{ false };
+    bool full{ false };
 };
 
 struct BuilderBuildOptions
@@ -58,9 +61,10 @@ public:
     auto build(const QStringList &args = { "/project/linglong/entry.sh" }) noexcept
       -> utils::error::Result<void>;
 
-    auto exportUAB(const QString &destination, const UABOption &option)
+    auto exportUAB(const QString &destination, const ExportOption &option)
       -> utils::error::Result<void>;
-    auto exportLayer(const QString &destination) -> utils::error::Result<void>;
+    auto exportLayer(const QString &destination, const QString &compressor)
+      -> utils::error::Result<void>;
 
     static auto extractLayer(const QString &layerPath, const QString &destination)
       -> utils::error::Result<void>;
@@ -74,10 +78,21 @@ public:
     static auto importLayer(repo::OSTreeRepo &repo, const QString &path)
       -> utils::error::Result<void>;
 
-    auto run(const QStringList &modules, const QStringList &args, const bool &debug)
-      -> utils::error::Result<void>;
+    auto run(const QStringList &modules,
+             const QStringList &args,
+             std::optional<runtime::ContainerOptions> init = std::nullopt,
+             bool debug = false) -> utils::error::Result<void>;
+    auto runtimeCheck(const QStringList &modules) -> utils::error::Result<void>;
 
     void setBuildOptions(const BuilderBuildOptions &options) noexcept { buildOptions = options; }
+
+private:
+    auto generateEntryScript() noexcept -> utils::error::Result<void>;
+    auto generateBuildDependsScript() noexcept -> utils::error::Result<bool>;
+    auto generateDependsScript() noexcept -> utils::error::Result<bool>;
+    void takeTerminalForeground();
+    void patchBuildPhaseConfig(ocppi::runtime::config::types::Config &config);
+    void mergeOutput(const QList<QDir> &src, const QDir &dest, const QStringList &target);
 
 private:
     repo::OSTreeRepo &repo;

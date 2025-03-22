@@ -64,18 +64,18 @@ void startProcess(const QString &program, const QStringList &args = {})
 
 std::vector<std::string> transformOldExec(int argc, char **argv) noexcept
 {
-    std::vector<std::string> res{ argv + 1, argv + argc };
-    if (std::find(res.begin(), res.end(), "run") == res.end()) {
+    std::vector<std::string> res;
+    std::reverse_copy(argv + 1, argv + argc, std::back_inserter(res));
+    if (std::find(res.rbegin(), res.rend(), "run") == res.rend()) {
         return res;
     }
 
-    auto exec = std::find(res.begin(), res.end(), "--exec");
-
-    if (exec == res.end()) {
+    auto exec = std::find(res.rbegin(), res.rend(), "--exec");
+    if (exec == res.rend()) {
         return res;
     }
 
-    if ((exec + 1) == res.end() || (exec + 2) != res.end()) {
+    if ((exec + 1) == res.rend() || (exec + 2) != res.rend()) {
         *exec = "--";
         qDebug() << "replace `--exec` with `--`";
         return res;
@@ -86,66 +86,35 @@ std::vector<std::string> transformOldExec(int argc, char **argv) noexcept
         wordfree(&words);
     });
 
-    auto ret = wordexp((exec + 1)->c_str(), &words, 0);
-    if (ret) {
+    if (auto ret = wordexp((exec + 1)->c_str(), &words, 0); ret != 0) {
         qCritical() << "wordexp on" << (exec + 1)->c_str() << "failed with" << ret
                     << "transform old exec arguments failed.";
         return res;
     }
 
-    res.erase(exec, res.end());
-    res.emplace_back("--");
-
-    for (size_t i = 0; i < words.we_wordc; i++) {
-        res.emplace_back(words.we_wordv[i]);
+    auto it = res.erase(res.rend().base(), exec.base());
+    res.emplace(it, "--");
+    for (decltype(words.we_wordc) i = 0; i < words.we_wordc; ++i) {
+        res.emplace(res.begin(), words.we_wordv[i]);
     }
 
-    QStringList list{};
-
-    for (const auto &arg : res) {
-        list.push_back(QString::fromStdString(arg));
-    }
-
-    qDebug() << "using new args" << list;
     return res;
-}
-
-void ensureDirectory(const std::filesystem::path &dir)
-{
-    std::error_code ec;
-    if (!std::filesystem::exists(dir, ec)) {
-        if (ec) {
-            qCritical() << QString{ "get status of" } << dir.c_str()
-                        << "failed:" << ec.message().c_str();
-            std::abort();
-        }
-
-        if (!std::filesystem::create_directory(dir, ec)) {
-            qCritical() << "failed to create directory:" << ec.message().c_str();
-            QCoreApplication::exit(ec.value());
-            std::abort();
-        }
-    }
 }
 
 int lockCheck() noexcept
 {
     std::error_code ec;
     constexpr auto lock = "/run/linglong/lock";
-    if (!std::filesystem::exists(lock, ec)) {
-        if (ec) {
-            qCritical() << "failed to get status of" << lock;
-            return -1;
-        }
-
-        return 0;
-    }
-
     auto fd = ::open(lock, O_RDONLY);
     if (fd == -1) {
-        qCritical() << "failed to open lock" << lock;
+        if (errno == ENOENT) {
+            return 0;
+        }
+
+        qCritical() << "failed to open lock" << lock << ::strerror(errno);
         return -1;
     }
+
     auto closeFd = linglong::utils::finally::finally([fd]() {
         ::close(fd);
     });
@@ -175,34 +144,39 @@ int main(int argc, char **argv)
 {
     bindtextdomain(PACKAGE_LOCALE_DOMAIN, PACKAGE_LOCALE_DIR);
     textdomain(PACKAGE_LOCALE_DOMAIN);
-    QCoreApplication app(argc, argv);
-
-    applicationInitialize();
-
-    bool versionFlag = false, jsonFlag = false, noDBus = false;
-
     CLI::App commandParser{ _(
       "linyaps CLI\n"
       "A CLI program to run application and manage application and runtime\n") };
+    argv = commandParser.ensure_utf8(argv);
+
+    QCoreApplication app(argc, argv);
+    applicationInitialize();
+
+    if (argc == 1) {
+        std::cout << commandParser.help() << std::endl;
+        return 0;
+    }
+
     commandParser.get_help_ptr()->description(_("Print this help message and exit"));
     commandParser.set_help_all_flag("--help-all", _("Expand all help"));
-
     commandParser.usage(_("Usage: ll-cli [OPTIONS] [SUBCOMMAND]"));
     commandParser.footer(_(R"(If you found any problems during use,
 You can report bugs to the linyaps team under this project: https://github.com/OpenAtom-Linyaps/linyaps/issues)"));
 
     // group empty will hide command
-    std::string CliHiddenGroup = "";
+    constexpr auto CliHiddenGroup = "";
 
     // add flags
-    commandParser.add_flag("--version", versionFlag, _("Show version"));
-    commandParser
-      .add_flag(
-        "--no-dbus",
-        noDBus,
-        _("Use peer to peer DBus, this is used only in case that DBus daemon is not available"))
-      ->group(CliHiddenGroup);
-    commandParser.add_flag("--json", jsonFlag, _(R"(Use json format to output result)"));
+    const auto &versionDescription = std::string{ _("Show version") };
+    auto *versionFlag = commandParser.add_flag("--version", versionDescription);
+
+    const auto &noDBusDescription = std::string{ _(
+      "Use peer to peer DBus, this is used only in case that DBus daemon is not available") };
+    auto *noDBusFlag =
+      commandParser.add_flag("--no-dbus", noDBusDescription)->group(CliHiddenGroup);
+
+    const auto &jsonDescription = std::string{ _("Use json format to output result") };
+    auto *jsonFlag = commandParser.add_flag("--json", jsonDescription);
 
     CLI::Validator validatorString{
         [](const std::string &parameter) {
@@ -215,31 +189,31 @@ You can report bugs to the linyaps team under this project: https://github.com/O
         ""
     };
 
-    CliOptions options = CliOptions{ .filePaths = {},
-                                     .fileUrls = {},
-                                     .workDir = "",
-                                     .appid = "",
-                                     .instance = "",
-                                     .module = "",
-                                     .type = "app",
-                                     .repoName = "",
-                                     .repoUrl = "",
-                                     .commands = {},
-                                     .showDevel = false,
-                                     .showUpgradeList = false,
-                                     .forceOpt = false,
-                                     .confirmOpt = false };
+    CliOptions options{ .filePaths = {},
+                        .fileUrls = {},
+                        .workDir = "",
+                        .appid = "",
+                        .instance = "",
+                        .module = "",
+                        .type = "app",
+                        .repoOptions = {},
+                        .commands = {},
+                        .showDevel = false,
+                        .showAll = false,
+                        .showUpgradeList = false,
+                        .forceOpt = false,
+                        .confirmOpt = false };
 
     // groups
-    std::string CliBuildInGroup = _("Managing installed applications and runtimes");
-    std::string CliAppManagingGroup = _("Managing running applications");
-    std::string CliSearchGroup = _("Finding applications and runtimes");
-    std::string CliRepoGroup = _("Managing remote repositories");
+    auto *CliBuildInGroup = _("Managing installed applications and runtimes");
+    auto *CliAppManagingGroup = _("Managing running applications");
+    auto *CliSearchGroup = _("Finding applications and runtimes");
+    auto *CliRepoGroup = _("Managing remote repositories");
 
     // add sub command run
-    auto cliRun = commandParser.add_subcommand("run", _("Run an application"))
-                    ->group(CliAppManagingGroup)
-                    ->fallthrough();
+    auto *cliRun = commandParser.add_subcommand("run", _("Run an application"))
+                     ->group(CliAppManagingGroup)
+                     ->fallthrough();
 
     // add sub command run options
     cliRun->add_option("APP", options.appid, _("Specify the application ID"))
@@ -256,11 +230,12 @@ ll-cli run org.deepin.demo -- bash
 ll-cli run org.deepin.demo -- bash -x /path/to/bash/script)"));
     cliRun
       ->add_option("--file", options.filePaths, _("Pass file to applications running in a sandbox"))
-      ->type_name("FILES")
-      ->check(CLI::ExistingFile);
+      ->type_name("FILE")
+      ->expected(0, -1);
     cliRun
       ->add_option("--url", options.fileUrls, _("Pass url to applications running in a sandbox"))
-      ->type_name("URLS");
+      ->type_name("URL")
+      ->expected(0, -1);
     cliRun->add_option("COMMAND", options.commands, _("Run commands in a running sandbox"));
 
     // add sub command ps
@@ -270,7 +245,7 @@ ll-cli run org.deepin.demo -- bash -x /path/to/bash/script)"));
       ->usage(_("Usage: ll-cli ps [OPTIONS]"));
 
     // add sub command exec
-    auto cliExec =
+    auto *cliExec =
       commandParser.add_subcommand("exec", _("Execute commands in the currently running sandbox"))
         ->fallthrough()
         ->group(CliHiddenGroup);
@@ -286,7 +261,7 @@ ll-cli run org.deepin.demo -- bash -x /path/to/bash/script)"));
     cliExec->add_option("COMMAND", options.commands, _("Run commands in a running sandbox"));
 
     // add sub command enter
-    auto cliEnter =
+    auto *cliEnter =
       commandParser
         .add_subcommand("enter", _("Enter the namespace where the application is running"))
         ->group(CliAppManagingGroup)
@@ -303,19 +278,21 @@ ll-cli run org.deepin.demo -- bash -x /path/to/bash/script)"));
     cliEnter->add_option("COMMAND", options.commands, _("Run commands in a running sandbox"));
 
     // add sub command kill
-    auto cliKill = commandParser.add_subcommand("kill", _("Stop running applications"))
-                     ->group(CliAppManagingGroup)
-                     ->fallthrough();
+    auto *cliKill = commandParser.add_subcommand("kill", _("Stop running applications"))
+                      ->group(CliAppManagingGroup)
+                      ->fallthrough();
     cliKill->usage(_("Usage: ll-cli kill [OPTIONS] APP"));
     cliKill
-      ->add_option("APP",
-                   options.appid,
-                   _("Specify the running application"))
+      ->add_option("-s,--signal",
+                   options.signal,
+                   _("Specify the signal to send to the application"))
+      ->default_val("SIGTERM");
+    cliKill->add_option("APP", options.appid, _("Specify the running application"))
       ->required()
       ->check(validatorString);
 
     // add sub command install
-    auto cliInstall =
+    auto *cliInstall =
       commandParser.add_subcommand("install", _("Installing an application or runtime"))
         ->group(CliBuildInGroup)
         ->fallthrough();
@@ -348,10 +325,9 @@ ll-cli install stable:org.deepin.demo/0.0.0.1/x86_64
     cliInstall->add_flag("-y", options.confirmOpt, _("Automatically answer yes to all questions"));
 
     // add sub command uninstall
-    // These two options are used when uninstalling apps in the app Store and need to be retained
-    // but hidden.
-    bool pruneOpt = false, allOpt = false;
-    auto cliUninstall =
+    // These two options are used when uninstalling apps in the app Store and need to be
+    // retained but hidden.
+    auto *cliUninstall =
       commandParser.add_subcommand("uninstall", _("Uninstall the application or runtimes"))
         ->group(CliBuildInGroup)
         ->fallthrough();
@@ -362,29 +338,36 @@ ll-cli install stable:org.deepin.demo/0.0.0.1/x86_64
     cliUninstall->add_option("--module", options.module, _("Uninstall a specify module"))
       ->type_name("MODULE")
       ->check(validatorString);
-    cliUninstall->add_flag("--prune", pruneOpt, "Remove all unused modules")->group(CliHiddenGroup);
-    cliUninstall->add_flag("--all", allOpt, "Uninstall all modules")->group(CliHiddenGroup);
+
+    // below options are used for compatibility with old ll-cli
+    const auto &pruneDescription = std::string{ _("Remove all unused modules") };
+    [[maybe_unused]] auto *pruneFlag =
+      cliUninstall->add_flag("--prune", pruneDescription)->group(CliHiddenGroup);
+
+    const auto &allDescription = std::string{ _("Uninstall all modules") };
+    [[maybe_unused]] auto *allFlag =
+      cliUninstall->add_flag("--all", allDescription)->group(CliHiddenGroup);
 
     // add sub command upgrade
-    auto cliUpgrade =
+    auto *cliUpgrade =
       commandParser.add_subcommand("upgrade", _("Upgrade the application or runtimes"))
         ->group(CliBuildInGroup)
         ->fallthrough();
     cliUpgrade->usage(_("Usage: ll-cli upgrade [OPTIONS] [APP]"));
     cliUpgrade
-      ->add_option(
-        "APP",
-        options.appid,
-        _("Specify the application ID.If it not be specified, all applications will be upgraded"))
+      ->add_option("APP",
+                   options.appid,
+                   _("Specify the application ID.If it not be specified, all "
+                     "applications will be upgraded"))
       ->check(validatorString);
 
     // add sub command search
-    auto cliSearch = commandParser
-                       .add_subcommand("search",
-                                       _("Search the applications/runtimes containing the "
-                                         "specified text from the remote repository"))
-                       ->fallthrough()
-                       ->group(CliSearchGroup);
+    auto *cliSearch = commandParser
+                        .add_subcommand("search",
+                                        _("Search the applications/runtimes containing the "
+                                          "specified text from the remote repository"))
+                        ->fallthrough()
+                        ->group(CliSearchGroup);
     cliSearch->usage(_(R"(Usage: ll-cli search [OPTIONS] KEYWORDS
 
 Example:
@@ -407,9 +390,10 @@ ll-cli search . --type=runtime)"));
       ->capture_default_str()
       ->check(validatorString);
     cliSearch->add_flag("--dev", options.showDevel, _("include develop application in result"));
+    cliSearch->add_flag("--all", options.showAll, _("Show all results"));
 
     // add sub command list
-    auto cliList =
+    auto *cliList =
       commandParser.add_subcommand("list", _("List installed applications or runtimes"))
         ->fallthrough()
         ->group(CliBuildInGroup);
@@ -436,7 +420,7 @@ ll-cli list --upgradable
                         "it only works for app"));
 
     // add sub command repo
-    auto cliRepo =
+    auto *cliRepo =
       commandParser
         .add_subcommand("repo",
                         _("Display or modify information of the repository currently using"))
@@ -445,47 +429,51 @@ ll-cli list --upgradable
     cliRepo->require_subcommand(1);
 
     // add repo sub command add
-    auto repoAdd = cliRepo->add_subcommand("add", _("Add a new repository"));
+    auto *repoAdd = cliRepo->add_subcommand("add", _("Add a new repository"));
     repoAdd->usage(_("Usage: ll-cli repo add [OPTIONS] NAME URL"));
-    repoAdd->add_option("NAME", options.repoName, _("Specify the repo name"))
+    repoAdd->add_option("NAME", options.repoOptions.repoName, _("Specify the repo name"))
       ->required()
       ->check(validatorString);
-    repoAdd->add_option("URL", options.repoUrl, _("Url of the repository"))
+    repoAdd->add_option("URL", options.repoOptions.repoUrl, _("Url of the repository"))
       ->required()
+      ->check(validatorString);
+    repoAdd->add_option("--alias", options.repoOptions.repoAlias, _("Alias of the repo name"))
+      ->type_name("ALIAS")
       ->check(validatorString);
 
     // add repo sub command modify
-    auto repoModify =
+    auto *repoModify =
       cliRepo->add_subcommand("modify", _("Modify repository URL"))->group(CliHiddenGroup);
-    repoModify->add_option("--name", options.repoName, _("Specify the repo name"))
+    repoModify->add_option("--name", options.repoOptions.repoName, _("Specify the repo name"))
       ->type_name("REPO")
       ->check(validatorString);
-    repoModify->add_option("URL", options.repoUrl, _("Url of the repository"))
+    repoModify->add_option("URL", options.repoOptions.repoUrl, _("Url of the repository"))
       ->required()
       ->check(validatorString);
 
     // add repo sub command remove
-    auto repoRemove = cliRepo->add_subcommand("remove", _("Remove a repository"));
+    auto *repoRemove = cliRepo->add_subcommand("remove", _("Remove a repository"));
     repoRemove->usage(_("Usage: ll-cli repo remove [OPTIONS] NAME"));
-    repoRemove->add_option("NAME", options.repoName, _("Specify the repo name"))
+    repoRemove->add_option("ALIAS", options.repoOptions.repoAlias, _("Alias of the repo name"))
       ->required()
       ->check(validatorString);
 
     // add repo sub command update
-    auto repoUpdate = cliRepo->add_subcommand("update", _("Update the repository URL"));
+    // TODO: add --repo and --url options
+    auto *repoUpdate = cliRepo->add_subcommand("update", _("Update the repository URL"));
     repoUpdate->usage(_("Usage: ll-cli repo update [OPTIONS] NAME URL"));
-    repoUpdate->add_option("NAME", options.repoName, _("Specify the repo name"))
+    repoUpdate->add_option("ALIAS", options.repoOptions.repoAlias, _("Alias of the repo name"))
       ->required()
       ->check(validatorString);
-    repoUpdate->add_option("URL", options.repoUrl, _("Url of the repository"))
+    repoUpdate->add_option("URL", options.repoOptions.repoUrl, _("Url of the repository"))
       ->required()
       ->check(validatorString);
 
     // add repo sub command set-default
-    auto repoSetDefault =
+    auto *repoSetDefault =
       cliRepo->add_subcommand("set-default", _("Set a default repository name"));
     repoSetDefault->usage(_("Usage: ll-cli repo set-default [OPTIONS] NAME"));
-    repoSetDefault->add_option("NAME", options.repoName, _("Specify the repo name"))
+    repoSetDefault->add_option("Alias", options.repoOptions.repoAlias, _("Alias of the repo name"))
       ->required()
       ->check(validatorString);
 
@@ -493,8 +481,20 @@ ll-cli list --upgradable
     cliRepo->add_subcommand("show", _("Show repository information"))
       ->usage(_("Usage: ll-cli repo show [OPTIONS]"));
 
+    // add repo sub command set-priority
+    auto *repoSetPriority =
+      cliRepo->add_subcommand("set-priority", _("Set the priority of the repo"));
+    repoSetPriority->usage(_("Usage: ll-cli repo set-priority ALIAS PRIORITY"));
+    repoSetPriority->add_option("ALIAS", options.repoOptions.repoAlias, _("Alias of the repo name"))
+      ->required()
+      ->check(validatorString);
+    repoSetPriority
+      ->add_option("PRIORITY", options.repoOptions.repoPriority, _("Priority of the repo"))
+      ->required()
+      ->check(validatorString);
+
     // add sub command info
-    auto cliInfo =
+    auto *cliInfo =
       commandParser
         .add_subcommand("info", _("Display information about installed apps or runtimes"))
         ->fallthrough()
@@ -508,7 +508,7 @@ ll-cli list --upgradable
       ->check(validatorString);
 
     // add sub command content
-    auto cliContent =
+    auto *cliContent =
       commandParser
         .add_subcommand("content", _("Display the exported files of installed application"))
         ->fallthrough()
@@ -523,14 +523,44 @@ ll-cli list --upgradable
       ->group(CliAppManagingGroup)
       ->usage(_("Usage: ll-cli prune [OPTIONS]"));
 
+    // add sub command inspect
+    auto *cliInspect =
+      commandParser
+        .add_subcommand("inspect", _("Display the information of installed application"))
+        ->group(CliHiddenGroup)
+        ->usage(_("Usage: ll-cli inspect [OPTIONS]"));
+    cliInspect->footer("This subcommand is for internal use only currently");
+    cliInspect->add_option("-p,--pid", options.pid, _("Specify the process id"))
+      ->check([](const std::string &input) -> std::string {
+          if (input.empty()) {
+              return _("Input parameter is empty, please input valid parameter instead");
+          }
+
+          try {
+              auto pid = std::stoull(input);
+              if (pid <= 0) {
+                  return _("Invalid process id");
+              }
+          } catch (std::exception &e) {
+              return _("Invalid pid format");
+          }
+
+          return {};
+      });
+
+    // add sub command dir
+    auto cliLayerDir =
+      commandParser.add_subcommand("dir", "Get the layer directory of app(base or runtime)")
+        ->group(CliHiddenGroup);
+    cliLayerDir->add_option("APP", options.appid, _("Specify the installed app(base or runtime)"))
+      ->required()
+      ->check(validatorString);
+
     auto res = transformOldExec(argc, argv);
+    CLI11_PARSE(commandParser, std::move(res));
 
-    std::reverse(res.begin(), res.end());
-
-    CLI11_PARSE(commandParser, res);
-
-    if (versionFlag) {
-        if (jsonFlag) {
+    if (*versionFlag) {
+        if (*jsonFlag) {
             std::cout << nlohmann::json{ { "version", LINGLONG_VERSION } } << std::endl;
         } else {
             std::cout << _("linyaps CLI version ") << LINGLONG_VERSION << std::endl;
@@ -545,21 +575,24 @@ ll-cli list --upgradable
         qCritical() << config.error();
         return -1;
     }
-    linglong::repo::ClientFactory clientFactory(config->repos[config->defaultRepo]);
+
+    auto defaultRepo = linglong::repo::getDefaultRepo(*config);
+    linglong::repo::ClientFactory clientFactory(std::move(defaultRepo.url));
 
     auto ret = QMetaObject::invokeMethod(
       QCoreApplication::instance(),
-      [&commandParser, &noDBus, &jsonFlag, &options, &config, &clientFactory]() {
+      [&commandParser,
+       noDBus = !!*noDBusFlag,
+       json = !!*jsonFlag,
+       options = std::move(options),
+       repoConfig = std::move(config).value(),
+       &clientFactory]() mutable {
           auto repoRoot = QDir(LINGLONG_ROOT);
           if (!repoRoot.exists()) {
               qCritical() << "underlying repository doesn't exist:" << repoRoot.absolutePath();
               QCoreApplication::exit(-1);
               return;
           }
-
-          auto userContainerDir =
-            std::filesystem::path{ "/run/linglong" } / std::to_string(::getuid());
-          ensureDirectory(userContainerDir);
 
           while (true) {
               auto lockOwner = lockCheck();
@@ -596,11 +629,7 @@ ll-cli list --upgradable
               }
 
               qInfo() << "some subcommands will failed in --no-dbus mode.";
-
               const auto pkgManAddress = QString("unix:path=/tmp/linglong-package-manager.socket");
-
-              QThread::sleep(1);
-
               startProcess("sudo",
                            { "--user",
                              LINGLONG_USERNAME,
@@ -640,13 +669,14 @@ ll-cli list --upgradable
           }
 
           std::unique_ptr<Printer> printer;
-          if (jsonFlag) {
+          if (json) {
               printer = std::make_unique<JSONPrinter>();
           } else {
               printer = std::make_unique<CLIPrinter>();
           }
 
-          auto *repo = new linglong::repo::OSTreeRepo(repoRoot, *config, clientFactory);
+          auto *repo =
+            new linglong::repo::OSTreeRepo(repoRoot, std::move(repoConfig), clientFactory);
           repo->setParent(QCoreApplication::instance());
 
           auto ociRuntimeCLI = qgetenv("LINGLONG_OCI_RUNTIME");
@@ -664,8 +694,8 @@ ll-cli list --upgradable
           if (!ociRuntime) {
               std::rethrow_exception(ociRuntime.error());
           }
-          auto *containerBuidler = new linglong::runtime::ContainerBuilder(**ociRuntime);
-          containerBuidler->setParent(QCoreApplication::instance());
+          auto *containerBuilder = new linglong::runtime::ContainerBuilder(**ociRuntime);
+          containerBuilder->setParent(QCoreApplication::instance());
 
           std::unique_ptr<InteractiveNotifier> notifier{ nullptr };
 
@@ -682,20 +712,20 @@ ll-cli list --upgradable
           }
 
           if (!notifier) {
-              qInfo()
-                << "Using DummyNotifier, expected interactions and prompts will not be displayed.";
+              qInfo() << "Using DummyNotifier, expected interactions and prompts will not be "
+                         "displayed.";
               notifier = std::make_unique<linglong::cli::DummyNotifier>();
           }
 
           auto *cli = new linglong::cli::Cli(*printer,
                                              **ociRuntime,
-                                             *containerBuidler,
+                                             *containerBuilder,
                                              *pkgMan,
                                              *repo,
                                              std::move(notifier),
                                              QCoreApplication::instance());
-          cli->setCliOptions(options);
-          QMap<QString, std::function<int(Cli *)>> subcommandMap = {
+          cli->setCliOptions(std::move(options));
+          std::unordered_map<std::string_view, int (Cli::*)(CLI::App *)> subcommandMap = {
               { "run", &Cli::run },
               { "exec", &Cli::exec },
               { "enter", &Cli::exec },
@@ -708,7 +738,10 @@ ll-cli list --upgradable
               { "list", &Cli::list },
               { "info", &Cli::info },
               { "content", &Cli::content },
-              { "prune", &Cli::prune }
+              { "prune", &Cli::prune },
+              { "inspect", &Cli::inspect },
+              { "repo", &Cli::repo },
+              { "dir", &Cli::dir }
           };
 
           if (QObject::connect(QCoreApplication::instance(),
@@ -721,25 +754,25 @@ ll-cli list --upgradable
               return;
           }
 
-          auto commands = commandParser.get_subcommands();
-
+          const auto &commands = commandParser.get_subcommands();
           auto ret =
             std::find_if(commands.begin(), commands.end(), [&subcommandMap](CLI::App *app) {
-                auto name = app->get_name();
-                return app->parsed()
-                  && (name == "repo" || subcommandMap.contains(QString::fromStdString(name)));
+                if (!app->parsed()) {
+                    return false;
+                }
+
+                return subcommandMap.find(app->get_name()) != subcommandMap.end();
             });
 
           if (ret == commands.end()) {
               std::cout << commandParser.help("", CLI::AppFormatMode::All);
-              return QCoreApplication::exit(-1);
+              QCoreApplication::exit(-1);
+              return;
           }
 
-          auto name = (*ret)->get_name();
-
+          const auto &name = (*ret)->get_name();
           // ll-cli repo need app to parse subcommand
-          return QCoreApplication::exit(
-            name == "repo" ? cli->repo(*ret) : subcommandMap[QString::fromStdString(name)](cli));
+          QCoreApplication::exit(std::invoke(subcommandMap[name], cli, *ret));
       },
       Qt::QueuedConnection);
     Q_ASSERT(ret);

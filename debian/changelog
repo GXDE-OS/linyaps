@@ -1,37 +1,44 @@
-linglong (1.7.4-1) unstable; urgency=medium
+linglong (1.7.11-1) unstable; urgency=medium
 
-  * fix: old version of ll-cli cannot export the new package
-  * fix: incorrect official website display in the DTK About dialog
-  * refactor: no need to pullDependency during ll-builder run
-  * fix: abnormal cursor size in wayland
-  * fix: PM blocked in a cancled task
-  * GXDE Sync
+  * fix: empty directory exists after app uninstall.
+  * fix: remove erofsfuse version restrictions.
+  * fix: no free space when installing dependencies.
+  * feat: supports selecting compression algorithm.
+  * fix: Invalid symbolic links should also be copied.
+  * fix: relative symlinks to directories from becoming empty folders.
 
- -- shenmo <shenmo@spark-app.store>  Wed, 18 Dec 2024 16:20:06 +0800
+ -- dengbo <dengbo@deepin.org>  Fri, 21 Mar 2025 17:46:05 +0800
 
-linglong (1.7.3-1) unstable; urgency=medium
+linglong (1.7.10-1) unstable; urgency=medium
 
-  * release 1.7.3-1
+  * release 1.7.10-1.
 
- -- dengbo <dengbo@deepin.org>  Tue, 10 Dec 2024 19:22:29 +0800
+ -- dengbo <dengbo@deepin.org>  Thu, 13 Mar 2025 14:34:56 +0800
 
-linglong (1.7.2-1) unstable; urgency=medium
+linglong (1.7.9-1) unstable; urgency=medium
 
-  * release 1.7.2-1
+  * fix: app cannot be started immediately after exiting. 
+  * fix: builder push crash.
+  * fix: fix mapping file.
+  * fix: correct mount option for distribution.info.
+  * fix: fix missing environment variable.
+  * fix: ostree config doesn't have the correct update.
+  * fix: failed to uninstall in low version of systemd.
 
- -- dengbo <dengbo@deepin.org>  Wed, 04 Dec 2024 17:39:49 +0800
+ -- dengbo <dengbo@deepin.org>  Wed, 12 Mar 2025 16:57:15 +0800
 
-linglong (1.7.1-1) unstable; urgency=medium
+linglong (1.7.8-1) unstable; urgency=medium
 
-  * release 1.7.1-1
+  * feat: optimizing cli output
+  * fix: builder does not use the channel field of linglong.yaml
+  * refactor: optimize starting container
+  * fix: Dont't mapping the file under /home
+  * fix: rewrite file error
+  * fix: app can not start by laucher
+  * fix: enter command cannot enter the container
+  * fix: upgrade exception when all packages are up to date
 
- -- dengbo <dengbo@deepin.org>  Fri, 29 Nov 2024 11:28:30 +0800
-
-linglong (1.7.0-1) unstable; urgency=medium
-
-  * release 1.7.0-1
-
- -- dengbo <dengbo@deepin.org>  Fri, 01 Nov 2024 11:06:45 +0800
+ -- dengbo <dengbo@deepin.org>  Fri, 28 Feb 2025 14:42:50 +0800
 
 linglong (1.5.6-1) unstable; urgency=medium
 

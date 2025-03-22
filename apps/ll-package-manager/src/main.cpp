@@ -12,14 +12,18 @@
 #include "linglong/utils/configure.h"
 #include "linglong/utils/dbus/register.h"
 #include "linglong/utils/global/initialize.h"
+#include "ocppi/cli/CLI.hpp"
+#include "ocppi/cli/crun/Crun.hpp"
 
 #include <QCoreApplication>
+
+#include <filesystem>
 
 using namespace linglong::utils::global;
 using namespace linglong::utils::dbus;
 
 namespace {
-void withDBusDaemon()
+void withDBusDaemon(ocppi::cli::CLI &cli)
 {
     auto config = linglong::repo::loadConfig(
       { LINGLONG_ROOT "/config.yaml", LINGLONG_DATA_DIR "/config.yaml" });
@@ -28,9 +32,9 @@ void withDBusDaemon()
         QCoreApplication::exit(-1);
         return;
     }
-
-    qWarning() << "server" << config->repos[config->defaultRepo].c_str();
-    auto *clientFactory = new linglong::repo::ClientFactory(config->repos[config->defaultRepo]);
+    const auto defaultRepo = linglong::repo::getDefaultRepo(*config);
+    qWarning() << "server" << defaultRepo.url.c_str();
+    auto *clientFactory = new linglong::repo::ClientFactory(defaultRepo.url);
     clientFactory->setParent(QCoreApplication::instance());
 
     auto repoRoot = QDir(LINGLONG_ROOT);
@@ -44,19 +48,22 @@ void withDBusDaemon()
         qCritical() << "failed to migrate repository";
         QCoreApplication::exit(-1);
     }
-
     auto *ostreeRepo = new linglong::repo::OSTreeRepo(repoRoot, *config, *clientFactory);
     ostreeRepo->setParent(QCoreApplication::instance());
-
-    if (auto ret = ostreeRepo->exportAllEntries(); !ret) {
-        qCritical() << "failed to export entries:" << ret.error();
+    auto result = ostreeRepo->fixExportAllEntries();
+    if (!result.has_value()) {
+        qCritical() << result.error().message();
     }
 
+    auto *containerBuilder = new linglong::runtime::ContainerBuilder(cli);
+    containerBuilder->setParent(QCoreApplication::instance());
+
     QDBusConnection conn = QDBusConnection::systemBus();
-    auto *packageManager =
-      new linglong::service::PackageManager(*ostreeRepo, QCoreApplication::instance());
+    auto *packageManager = new linglong::service::PackageManager(*ostreeRepo,
+                                                                 *containerBuilder,
+                                                                 QCoreApplication::instance());
     new linglong::adaptors::package_manger::PackageManager1(packageManager);
-    auto result = registerDBusObject(conn, "/org/deepin/linglong/PackageManager1", packageManager);
+    result = registerDBusObject(conn, "/org/deepin/linglong/PackageManager1", packageManager);
     if (!result.has_value()) {
         qCritical().noquote() << "Launching failed:" << Qt::endl << result.error().message();
         QCoreApplication::exit(-1);
@@ -82,7 +89,7 @@ void withDBusDaemon()
     });
 }
 
-void withoutDBusDaemon()
+void withoutDBusDaemon(ocppi::cli::CLI &cli)
 {
     qInfo() << "Running linglong package manager without dbus daemon...";
 
@@ -93,7 +100,9 @@ void withoutDBusDaemon()
         QCoreApplication::exit(-1);
         return;
     }
-    auto *clientFactory = new linglong::repo::ClientFactory(config->repos[config->defaultRepo]);
+
+    const auto defaultRepo = linglong::repo::getDefaultRepo(*config);
+    auto *clientFactory = new linglong::repo::ClientFactory(defaultRepo.url);
     clientFactory->setParent(QCoreApplication::instance());
 
     auto repoRoot = QDir(LINGLONG_ROOT);
@@ -104,9 +113,17 @@ void withoutDBusDaemon()
 
     auto *ostreeRepo = new linglong::repo::OSTreeRepo(repoRoot, *config, *clientFactory);
     ostreeRepo->setParent(QCoreApplication::instance());
+    auto result = ostreeRepo->fixExportAllEntries();
+    if (!result.has_value()) {
+        qCritical() << result.error().message();
+    }
 
-    auto packageManager =
-      new linglong::service::PackageManager(*ostreeRepo, QCoreApplication::instance());
+    auto *containerBuilder = new linglong::runtime::ContainerBuilder(cli);
+    containerBuilder->setParent(QCoreApplication::instance());
+
+    auto packageManager = new linglong::service::PackageManager(*ostreeRepo,
+                                                                *containerBuilder,
+                                                                QCoreApplication::instance());
     new linglong::adaptors::package_manger::PackageManager1(packageManager);
 
     auto server = new QDBusServer("unix:path=/tmp/linglong-package-manager.socket",
@@ -143,9 +160,25 @@ auto main(int argc, char *argv[]) -> int
 
     applicationInitialize();
 
+    auto ociRuntimeCLI = qgetenv("LINGLONG_OCI_RUNTIME");
+    if (ociRuntimeCLI.isEmpty()) {
+        ociRuntimeCLI = LINGLONG_DEFAULT_OCI_RUNTIME;
+    }
+
+    auto path = QStandardPaths::findExecutable(ociRuntimeCLI);
+    if (path.isEmpty()) {
+        qCritical() << ociRuntimeCLI << "not found";
+        return -1;
+    }
+
+    auto ociRuntime = ocppi::cli::crun::Crun::New(path.toStdString());
+    if (!ociRuntime) {
+        std::rethrow_exception(ociRuntime.error());
+    }
+
     auto ret = QMetaObject::invokeMethod(
       QCoreApplication::instance(),
-      []() {
+      [&ociRuntime]() {
           QString user = qgetenv("USER");
           if (user != LINGLONG_USERNAME) {
               QCoreApplication::exit(-1);
@@ -160,11 +193,11 @@ auto main(int argc, char *argv[]) -> int
           parser.parse(QCoreApplication::arguments());
 
           if (!parser.isSet(optBus)) {
-              withDBusDaemon();
+              withDBusDaemon(**ociRuntime);
               return;
           }
 
-          withoutDBusDaemon();
+          withoutDBusDaemon(**ociRuntime);
           return;
       },
       Qt::QueuedConnection);

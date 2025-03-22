@@ -6,7 +6,7 @@
 
 #pragma once
 
-#include "linglong/api/types/v1/RepoConfig.hpp"
+#include "linglong/api/types/v1/RepoConfigV2.hpp"
 #include "linglong/package/fuzzy_reference.h"
 #include "linglong/package/layer_dir.h"
 #include "linglong/package/reference.h"
@@ -18,6 +18,7 @@
 #include <ostree.h>
 
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -38,13 +39,13 @@ public:
     OSTreeRepo &operator=(const OSTreeRepo &) = delete;
     OSTreeRepo &operator=(OSTreeRepo &&) = delete;
     OSTreeRepo(const QDir &path,
-               const api::types::v1::RepoConfig &cfg,
+               api::types::v1::RepoConfigV2 cfg,
                ClientFactory &clientFactory) noexcept;
 
     ~OSTreeRepo() override;
 
-    [[nodiscard]] const api::types::v1::RepoConfig &getConfig() const noexcept;
-    utils::error::Result<void> setConfig(const api::types::v1::RepoConfig &cfg) noexcept;
+    [[nodiscard]] const api::types::v1::RepoConfigV2 &getConfig() const noexcept;
+    utils::error::Result<void> setConfig(const api::types::v1::RepoConfigV2 &cfg) noexcept;
 
     utils::error::Result<package::LayerDir>
     importLayerDir(const package::LayerDir &dir,
@@ -89,8 +90,6 @@ public:
     utils::error::Result<void> prune();
 
     void removeDanglingXDGIntergation() noexcept;
-    // exportEntries will clear the entries/share and export all applications to the entries/share
-    utils::error::Result<void> exportAllEntries() noexcept;
     // exportReference should be called when LayerDir of ref is existed in local repo
     void exportReference(const package::Reference &ref) noexcept;
     // unexportReference should be called when LayerDir of ref is existed in local repo
@@ -112,14 +111,18 @@ public:
     [[nodiscard]] utils::error::Result<std::shared_ptr<package::LayerDir>>
     getMergedModuleDir(const package::Reference &ref, const QStringList &modules) const noexcept;
     std::vector<std::string> getModuleList(const package::Reference &ref) noexcept;
+    [[nodiscard]] utils::error::Result<std::vector<std::string>>
+    getRemoteModuleList(const package::Reference &ref,
+                        const std::optional<std::vector<std::string>> &filter) const noexcept;
 
     [[nodiscard]] utils::error::Result<api::types::v1::RepositoryCacheLayersItem>
     getLayerItem(const package::Reference &ref,
                  std::string module = "binary",
                  const std::optional<std::string> &subRef = std::nullopt) const noexcept;
+    utils::error::Result<void> fixExportAllEntries() noexcept;
 
 private:
-    api::types::v1::RepoConfig cfg;
+    api::types::v1::RepoConfigV2 cfg;
 
     struct OstreeRepoDeleter
     {
@@ -135,7 +138,7 @@ private:
     std::unique_ptr<linglong::repo::RepoCache> cache{ nullptr };
     ClientFactory &m_clientFactory;
 
-    utils::error::Result<void> updateConfig(const api::types::v1::RepoConfig &newCfg) noexcept;
+    utils::error::Result<void> updateConfig(const api::types::v1::RepoConfigV2 &newCfg) noexcept;
     QDir ostreeRepoDir() const noexcept;
     [[nodiscard]] utils::error::Result<QDir>
     ensureEmptyLayerDir(const std::string &commit) const noexcept;
@@ -150,8 +153,18 @@ private:
     [[nodiscard]] utils::error::Result<package::LayerDir>
     getMergedModuleDir(const api::types::v1::RepositoryCacheLayersItem &layer,
                        bool fallbackLayerDir = true) const noexcept;
-    utils::error::Result<void> exportEntries(
-      const QDir &entriesDir, const api::types::v1::RepositoryCacheLayersItem &item) noexcept;
+    utils::error::Result<void>
+    exportEntries(const std::filesystem::path &rootEntriesDir,
+                  const api::types::v1::RepositoryCacheLayersItem &item) noexcept;
+    static utils::error::Result<void> IniLikeFileRewrite(const QFileInfo &info,
+                                                         const QString &id) noexcept;
+
+    utils::error::Result<void> exportDir(const std::string &appID,
+                                         const std::filesystem::path &source,
+                                         const std::filesystem::path &destination,
+                                         const int &max_depth);
+    // exportEntries will clear the entries/share and export all applications to the entries/share
+    utils::error::Result<void> exportAllEntries() noexcept;
 };
 
 } // namespace linglong::repo

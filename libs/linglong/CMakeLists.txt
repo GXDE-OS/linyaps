@@ -73,14 +73,14 @@ pfl_add_library(
   src/linglong/runtime/container_builder.h
   src/linglong/runtime/container.cpp
   src/linglong/runtime/container.h
-  # FIXME(black_desk): After refactory, all tests are failed to compile as I
-  # have no time to fix them now. Let's bring them back later. TESTS ll-tests
-  # http-client-tests
+  TESTS
+  ll-tests
   COMPILE_FEATURES
   PUBLIC
   cxx_std_17
   LINK_LIBRARIES
   PUBLIC
+  rt # for shm_open and shm_unlink
   pthread
   linglong::dbus-api
   linglong::utils
@@ -93,7 +93,7 @@ pfl_add_library(
   LinglongRepoClientAPI
   ytj::ytj
   tl::expected
-  linglong::ocppi
+  linglong::oci-cfg-generators
   CLI11::CLI11
   ${YAML_CPP})
 

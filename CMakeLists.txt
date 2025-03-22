@@ -6,7 +6,7 @@ cmake_minimum_required(VERSION 3.11.4)
 
 project(
   linglong
-  VERSION 1.6.1
+  VERSION 1.7.11
   DESCRIPTION "a container based application package manager for Linux desktop"
   HOMEPAGE_URL "https://github.com/OpenAtom-Linyaps/linyaps"
   LANGUAGES CXX)
@@ -179,6 +179,19 @@ add_definitions("-DQT_NO_KEYWORDS")
 # NOTE(black_desk): Enable Qt logging with context.
 add_definitions("-DQT_MESSAGELOGCONTEXT")
 
+# FIXME: can not start container since the kernel does not support the
+# CLONE_NEWUSER feature in the chroot environment, reference:
+# https://man7.org/linux/man-pages/man2/unshare.2.html. so we skip font cache
+# generator by LINGLONG_FONT_CACHE_GENERATOR, it can be removed when the above
+# problem is solved.
+set(ENABLE_FONT_CACHE_GENERATOR
+    OFF
+    CACHE BOOL "enable font cache generator")
+
+if(ENABLE_FONT_CACHE_GENERATOR)
+  add_definitions(-DLINGLONG_FONT_CACHE_GENERATOR)
+endif()
+
 # We need to support both Qt5 and Qt6, and according to the Qt documentation, we
 # should be using versioned targets and functions. These varible must be set
 # before find_package()
@@ -214,14 +227,9 @@ pfl_add_libraries(
   utils
   ocppi
   linglong
+  oci-cfg-generators
   APPS
-  generators/00-id-mapping
-  generators/05-initialize
-  generators/20-devices
-  generators/25-host-env
-  generators/30-user-home
-  generators/40-host-ipc
-  generators/90-legacy
+  ll-dialog
   ll-box
   ll-builder
   ll-cli

@@ -7,8 +7,8 @@
 #include "container/container.h"
 #include "container/helper.h"
 #include "util/logger.h"
-#include "util/message_reader.h"
 #include "util/oci_runtime.h"
+#include "util/platform.h"
 
 #include <argp.h>
 
@@ -59,7 +59,7 @@ struct arg_kill
 {
     struct box_args *global{ nullptr };
     std::string container;
-    std::string signal;
+    std::optional<std::string> signal;
 };
 
 struct box_args
@@ -332,11 +332,25 @@ try {
 
 int kill(const arg_kill &arg) noexcept
 {
-    int sig = SIGTERM;
-    if (!arg.signal.empty()) {
-        if (std::all_of(arg.signal.cbegin(), arg.signal.cend(), ::isdigit)) {
-            sig = std::stoi(arg.signal);
+    auto signal = arg.signal.value_or("SIGTERM");
+    int sig{ -1 };
+    while (true) {
+        if (std::all_of(signal.cbegin(), signal.cend(), ::isdigit)) {
+            sig = std::stoi(signal);
+            break;
         }
+
+        if (signal.rfind("SIG", 0) == std::string::npos) {
+            signal.insert(0, "SIG");
+        }
+
+        sig = linglong::util::strToSig(signal);
+        if (sig == -1) {
+            logErr() << "invalid signal" << signal;
+            return -1;
+        }
+
+        break;
     }
 
     auto containers = linglong::readAllContainerJson(arg.global->root);
@@ -346,6 +360,7 @@ int kill(const arg_kill &arg) noexcept
         }
 
         auto pid = container["pid"].get<pid_t>();
+        logDbg() << "kill" << pid << "with" << signal << "(" << sig << ")";
         return ::kill(pid, sig);
     }
 
@@ -432,14 +447,12 @@ int parse_exec(int key, char *arg, struct argp_state *state)
 
 arg_list subCommand_list(struct argp_state *state)
 {
-    struct arg_list list_arg
-    {
+    struct arg_list list_arg{
         .global = reinterpret_cast<struct box_args *>(state->input), // NOLINT
     };
 
     int argc = state->argc - state->next + 1;
     char **argv = &state->argv[state->next - 1]; // NOLINT
-    char *argv0 = argv[0];                       // NOLINT
 
     std::string name = state->name;
     name += " list";
@@ -470,8 +483,7 @@ arg_list subCommand_list(struct argp_state *state)
 
 arg_run subCommand_run(struct argp_state *state)
 {
-    struct arg_run run_arg
-    {
+    struct arg_run run_arg{
         .global = reinterpret_cast<struct box_args *>(state->input), // NOLINT
     };
 
@@ -524,8 +536,7 @@ arg_run subCommand_run(struct argp_state *state)
 
 arg_exec subCommand_exec(struct argp_state *state)
 {
-    struct arg_exec exec_arg
-    {
+    struct arg_exec exec_arg{
         .global = reinterpret_cast<struct box_args *>(state->input), // NOLINT
     };
 
@@ -581,8 +592,7 @@ arg_exec subCommand_exec(struct argp_state *state)
 
 arg_kill subCommand_kill(struct argp_state *state)
 {
-    struct arg_kill kill_arg
-    {
+    struct arg_kill kill_arg{
         .global = reinterpret_cast<struct box_args *>(state->input), // NOLINT
     };
 
@@ -676,6 +686,52 @@ Overload(Ts...) -> Overload<Ts...>;
 
 int main(int argc, char **argv)
 {
+    // detecting some kernel features at runtime to reporting errors friendly
+    std::error_code ec;
+    std::filesystem::path feature{ "/proc/sys/kernel/unprivileged_userns_clone" };
+
+    auto check = [](const std::filesystem::path &setting, int expected) {
+        // We assume that the fact that a file does not exist or that an error occurs during the
+        // detection process does not mean that the feature is disabled.
+        std::error_code ec;
+        if (!std::filesystem::exists(setting, ec)) {
+            return true;
+        }
+
+        std::ifstream stream{ setting };
+        if (!stream.is_open()) {
+            return true;
+        }
+
+        std::string content;
+        std::getline(stream, content);
+
+        try {
+            return std::stoi(content) == expected;
+        } catch (std::exception &e) {
+            logWan() << "ignore exception" << e.what() << "and continue"; // NOLINT
+            return true;
+        }
+    };
+
+    // for debian:
+    // https://salsa.debian.org/kernel-team/linux/-/blob/debian/latest/debian/patches/debian/add-sysctl-to-disallow-unprivileged-CLONE_NEWUSER-by-default.patch
+    if (!check("/proc/sys/kernel/unprivileged_userns_clone", 1)) {
+        logErr() << "unprivileged_userns_clone is not enabled";
+        return EPERM;
+    }
+
+    // for ubuntu:
+    // https://gitlab.com/apparmor/apparmor/-/wikis/unprivileged_userns_restriction#disabling-unprivileged-user-namespaces
+    if (!check("/proc/sys/kernel/apparmor_restrict_unprivileged_unconfined", 0)) {
+        logErr() << "apparmor_restrict_unprivileged_unconfined is not disabled";
+        return EPERM;
+    }
+    if (!check("/proc/sys/kernel/apparmor_restrict_unprivileged_userns", 0)) {
+        logErr() << "apparmor_restrict_unprivileged_userns is not disabled";
+        return EPERM;
+    }
+
     if (argc == 1) {
         logErr() << "please specify a command";
         return -1;
@@ -726,10 +782,7 @@ int main(int argc, char **argv)
                                 .args_doc = "COMMAND [OPTION...]",
                                 .doc = doc }; // NOLINT
 
-    struct box_args global
-    {
-        .root = defaultRootDir
-    };
+    struct box_args global{ .root = defaultRootDir };
 
     if (argp_parse(&global_argp, argc, argv, ARGP_IN_ORDER, nullptr, &global) != 0) {
         logErr() << "failed to parse arguments";

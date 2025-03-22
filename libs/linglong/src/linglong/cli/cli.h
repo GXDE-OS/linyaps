@@ -20,6 +20,15 @@ namespace linglong::cli {
 
 class Printer;
 
+// TODO: split this into multiple options
+struct RepoOptions
+{
+    std::string repoName;
+    std::string repoUrl;
+    std::optional<std::string> repoAlias;
+    std::int64_t repoPriority{ 0 };
+};
+
 struct CliOptions
 {
     std::vector<std::string> filePaths;
@@ -29,13 +38,15 @@ struct CliOptions
     std::string instance;
     std::string module;
     std::string type;
-    std::string repoName;
-    std::string repoUrl;
+    RepoOptions repoOptions;
     std::vector<std::string> commands;
     bool showDevel;
+    bool showAll;
     bool showUpgradeList;
     bool forceOpt;
     bool confirmOpt;
+    std::optional<pid_t> pid;
+    std::string signal;
 };
 
 class Cli : public QObject
@@ -55,32 +66,40 @@ public:
         std::unique_ptr<InteractiveNotifier> &&notifier,
         QObject *parent = nullptr);
 
-    int run();
-    int exec();
-    int enter();
-    int ps();
-    int kill();
-    int install();
-    int upgrade();
-    int search();
-    int uninstall();
-    int list();
-    int repo(CLI::App *app);
-    int info();
-    int content();
-    int prune();
+    int run(CLI::App *subcommand);
+    int exec(CLI::App *subcommand);
+    int enter(CLI::App *subcommand);
+    int ps(CLI::App *subcommand);
+    int kill(CLI::App *subcommand);
+    int install(CLI::App *subcommand);
+    int upgrade(CLI::App *subcommand);
+    int search(CLI::App *subcommand);
+    int uninstall(CLI::App *subcommand);
+    int list(CLI::App *subcommand);
+    int repo(CLI::App *subcommand);
+    int info(CLI::App *subcommand);
+    int content(CLI::App *subcommand);
+    int prune(CLI::App *subcommand);
+    int inspect(CLI::App *subcommand);
+    int dir(CLI::App *subcommand);
 
     void cancelCurrentTask();
 
     void setCliOptions(const CliOptions &options) noexcept { this->options = options; }
 
+    void setCliOptions(CliOptions &&options) noexcept { this->options = std::move(options); }
+
 private:
+    [[nodiscard]] static utils::error::Result<void>
+    RequestDirectories(const api::types::v1::PackageInfoV2 &info) noexcept;
     [[nodiscard]] std::vector<std::string>
     filePathMapping(const std::vector<std::string> &command) const noexcept;
-    static std::filesystem::path mappingFile(const std::filesystem::path &file) noexcept;
-    static std::string mappingUrl(const std::string &url) noexcept;
+    static std::string mappingFile(const std::filesystem::path &file) noexcept;
+    static std::string mappingUrl(std::string_view url) noexcept;
     static void filterPackageInfosFromType(std::vector<api::types::v1::PackageInfoV2> &list,
                                            const std::string &type) noexcept;
+    static utils::error::Result<void>
+    filterPackageInfosFromVersion(std::vector<api::types::v1::PackageInfoV2> &list) noexcept;
     void printProgress() noexcept;
     [[nodiscard]] utils::error::Result<std::vector<api::types::v1::CliContainer>>
     getCurrentContainers() const noexcept;
@@ -92,7 +111,12 @@ private:
     listUpgradable(const std::vector<api::types::v1::PackageInfoV2> &pkgs);
     utils::error::Result<std::vector<api::types::v1::UpgradeListResult>>
     listUpgradable(const std::string &type);
+    int generateCache(const package::Reference &ref);
+    utils::error::Result<std::string>
+    ensureCache(const package::Reference &ref,
+                const api::types::v1::RepositoryCacheLayersItem &appLayerItem) noexcept;
     QDBusReply<QString> authorization();
+    void updateAM() noexcept;
 
 private Q_SLOTS:
     // maybe use in the future

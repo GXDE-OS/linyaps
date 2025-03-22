@@ -22,12 +22,22 @@ ll-builder export
 #运行编译后的可执行程序
 ll-builder run
 
+# 测试dbus环境变量没有问题
+ll-builder run --exec export | grep DBUS_SESSION_BUS_ADDRESS
+ll-builder run --exec export | grep DBUS_SYSTEM_BUS_ADDRESS
+# 测试session dbus环境变量包含参数时能正常处理
+export DBUS_SESSION_BUS_ADDRESS=$DBUS_SESSION_BUS_ADDRESS,test=1
+ll-builder run --exec export | grep DBUS_SESSION_BUS_ADDRESS | grep test=1
+# 测试system dbus环境变量包含参数时能正常处理
+export DBUS_SYSTEM_BUS_ADDRESS="unix:path=/var/run/dbus/system_bus_socket,test=2"
+ll-builder run --exec export | grep DBUS_SYSTEM_BUS_ADDRESS | grep test=2
+
 #运行并安装uab
-sudo ll-cli uninstall org.dde.demo || true
+ll-cli uninstall org.dde.demo || true
 ./org.dde.demo_x86_64_0.0.0.1_main.uab
 
 #安装构建的应用
-sudo ll-cli uninstall org.dde.demo || true
+ll-cli uninstall org.dde.demo || true
 ll-cli install org.dde.demo_0.0.0.1_x86_64_binary.layer
 
 #运行安装好的demo
@@ -51,19 +61,19 @@ ll-cli search . --type=runtime
 appid=org.dde.calendar
 test_version=5.13.1.1
 #先卸载再安装
-sudo ll-cli uninstall "$appid" || true
+ll-cli uninstall "$appid" || true
 
 #ll-cli install命令用来安装玲珑应用
-sudo ll-cli install "$appid"
+ll-cli install "$appid"
 
 #先卸载再安装
-sudo ll-cli uninstall "$appid"
+ll-cli uninstall "$appid"
 
 #安装指定版本
-sudo ll-cli install "$appid/$test_version"
+ll-cli install "$appid/$test_version"
 
 #更新新版本
-sudo ll-cli upgrade "$appid"
+ll-cli upgrade "$appid"
 
 #运行玲珑应用
 ll-cli run "$appid" &
@@ -72,3 +82,21 @@ sleep 20
 cur_version=$(ll-cli info "$appid" | jq '.version' | xargs)
 arch=$(uname -m)
 ll-cli kill "main:$appid/$cur_version/$arch"
+
+# 测试module安装
+ll-cli uninstall org.dde.calendar
+ll-cli install org.dde.calendar/5.14.4.102
+ll-cli install --module develop org.dde.calendar
+ll-cli install --module unuse org.dde.calendar
+ll-cli install --module lang-ja org.dde.calendar
+# 101版本没有unuse模块，降级后删除unuse模块，保留其他模块
+ll-cli install --force org.dde.calendar/5.14.4.101
+ll-cli list | grep org.dde.calendar | grep -q binary
+ll-cli list | grep org.dde.calendar | grep -q develop
+ll-cli list | grep org.dde.calendar | grep -q lang-ja
+ll-cli list | grep org.dde.calendar | grep -vq unuse
+# 最新版本没有lang-ja模块，升级后删除lang-ja模块，保留其他模块
+ll-cli upgrade org.dde.calendar
+ll-cli list | grep org.dde.calendar | grep -q binary
+ll-cli list | grep org.dde.calendar | grep -q develop
+ll-cli list | grep org.dde.calendar | grep -vq lang-ja

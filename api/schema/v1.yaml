@@ -21,6 +21,13 @@ description: Types used as v1 API of linglong
   D-Bus service, configuration files and CLI output.
   The top level type is a place holder to make quicktype work.
 $defs:
+  InspectResult:
+    description: the result of inspecting a container
+    type: object
+    properties:
+      appID:
+        type: string
+        description: appID of container
   ApplicationConfiguration:
     title: ApplicationConfiguration
     description: application configuration
@@ -33,30 +40,28 @@ $defs:
         description: version of configuration file
       permissions:
         $ref: '#/$defs/ApplicationConfigurationPermissions'
-  ApplicationAccessPrivileges:
-    description: |
-      Privileges that application access to some directories
-      which in user's home directory.
-      directory should be relative path of home directory,
-      e.g. [ "Desktop", "Downloads/browser" ]
-    type: object
-    properties:
-      userDirectories:
-        type: object
-        properties:
-          allowed:
-            type: array
-            items:
-              type: string
-          disallowed:
-            type: array
-            items:
-              type: string
+  XDGDirectoryPermissions:
+    title: XDGDirectoryPermissions
+    type: array
+    items:
+      type: object
+      required:
+        - allowed
+        - dirType
+      properties:
+        allowed:
+          type: boolean
+          description: whether the xdg dir is allowed
+        dirType:
+          type: string
+          description: type of xdg dir, could be one of [Desktop, Downloads, Documents, Music, Pictures, Videos]
   ApplicationConfigurationPermissions:
     title: ApplicationConfigurationPermissions
     description: application configuration permissions
     type: object
     properties:
+      xdgDirectories:
+        $ref: '#/$defs/XDGDirectoryPermissions'
       binds:
         type: array
         items:
@@ -183,6 +188,9 @@ $defs:
         description: The format version of linglong.meta data.
         type: string
         const: '1'
+      onlyApp:
+        description: whether this UAB file has been exported in only-App mode.
+        type: boolean
       sections:
         type: object
         required:
@@ -324,6 +332,25 @@ $defs:
         title: BuilderProjectBuildScript
         description: build script of builder project
         type: string
+      buildext:
+        title: BuilderProjectBuildExt
+        description: build extension for builder project
+        type: object
+        properties:
+          apt:
+            description: build extension for apt
+            type: object
+            properties:
+              build_depends:
+                description: packages to be installed in build environment before build starting
+                type: array
+                items:
+                  type: string
+              depends:
+                description: packages to be installed in runtime environment
+                type: array
+                items:
+                  type: string
       command:
         type: array
         description: command of builder project
@@ -397,6 +424,47 @@ $defs:
         additionalProperties:
           type: string
           description: additional properties of repos
+
+  RepoConfigV2:
+    description: Configuration file for local linglong repository.
+    type: object
+    required:
+      - version
+      - defaultRepo
+      - repos
+    properties:
+      version:
+        type: integer
+        description: version of repo config
+      defaultRepo:
+        type: string
+        description: default repo of repo config
+      repos:
+        type: array
+        description: repos of repo config
+        items:
+          $ref: '#/$defs/Repo'
+        minItems: 1
+  Repo:
+    description: Configuration for a single repository.
+    type: object
+    required:
+      - name
+      - url
+      - priority
+    properties:
+      name:
+        type: string
+        description: repo name
+      url:
+        type: string
+        description: repo url
+      alias:
+        type: string
+        description: alias of repo name
+      priority:
+        type: integer
+        description: priority of repo
   LayerInfo:
     description: Meta information on the head of layer file.
     type: object
@@ -551,6 +619,16 @@ $defs:
       description:
         type: string
         description: description of package info
+  ApplicationPermissionsRequest:
+    type: object
+    required:
+      - appID
+      - xdgDirectories
+    properties:
+      appID:
+        type: string
+      xdgDirectories:
+        $ref: '#/$defs/XDGDirectoryPermissions'
   CommonOptions:
     title: CommonOptions
     description: this is common option for Install and InstallFromFile
@@ -636,7 +714,21 @@ $defs:
       - options
     properties:
       package:
-        $ref: '#/$defs/PackageManager1Package'
+        title: PackageManager1InstallParametersPacakge
+        type: object
+        required:
+          - id
+        properties:
+          channel:
+            type: string
+          id:
+            type: string
+          version:
+            type: string
+          modules:
+            type: array
+            items:
+              type: string
       options:
         $ref: '#/$defs/CommonOptions'
   PackageManager1PackageTaskResult:
@@ -755,7 +847,7 @@ $defs:
         type: string
         description: version of linglong at the time of generating the file
       config:
-        $ref: '#/$defs/RepoConfig'
+        $ref: '#/$defs/RepoConfigV2'
       layers:
         type: array
         items:
@@ -826,6 +918,39 @@ $defs:
         type: string
       new_version:
         description: version of latest version in remote repo.
+        type: string
+  DialogMessage:
+    description: |
+      For interactive with frontend dialog. All message exchange between dialog and
+      caller should use stdin and stdout. The first four bytes indicate the length
+      of the message. The rest of the payload is the actual payload.
+    type: object
+    required:
+      - type
+      - payload
+    properties:
+      type:
+        description: type of dialog message, possible values are ['Handshake', 'Request']
+        type: string
+      payload:
+        description: payload of dialog message, the real payload depends on type
+        type: string
+  DialogHandShakePayload:
+    type: object
+    required:
+      - version
+    properties:
+      version:
+        description: |
+          Minimum protocol version supported by the client.
+          Current version is 1.0.
+          1.0 behavior: dialog MUST report self minimal protocol version at program start.
+              if client not reported protocol version, caller SHOULD kill dialog after timeout.
+              then, caller will send a directory permission request to dialog. if timeout,
+              client SHOULD exit immediately. after that, caller will wait for dialog exit
+              and use dialog exit code to know user allow the request or not. dialog MUST exit
+              with 0, any other value means user reject the request or dialog internal error and
+              dialog could output any message to stderr.
         type: string
 type: object
 properties:

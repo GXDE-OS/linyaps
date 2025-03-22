@@ -6,6 +6,7 @@
 
 #include "linglong/builder/config.h"
 #include "linglong/builder/linglong_builder.h"
+#include "linglong/cli/cli.h"
 #include "linglong/package/architecture.h"
 #include "linglong/package/version.h"
 #include "linglong/repo/client_factory.h"
@@ -285,30 +286,45 @@ You can report bugs to the linyaps team under this project: https://github.com/O
 
     // build export
     bool layerMode = false;
-    std::string iconFile;
-    auto buildExport = commandParser.add_subcommand("export", _("Export to linyaps layer or uab"));
+    linglong::builder::ExportOption ExportOption{ .exportDevelop = false, .exportI18n = true };
+    auto *buildExport = commandParser.add_subcommand("export", _("Export to linyaps layer or uab"));
     buildExport->usage(_("Usage: ll-builder export [OPTIONS]"));
+
     buildExport->add_option("-f, --file", filePath, _("File path of the linglong.yaml"))
       ->type_name("FILE")
       ->capture_default_str()
       ->check(CLI::ExistingFile);
-    buildExport->add_option("--icon", iconFile, _("Uab icon (optional)"))
+    buildExport
+      ->add_option("-z, --compressor",
+                   ExportOption.compressor,
+                   "supported compressors are: lz4(uab default), lzam(layer default), zstd")
+      ->type_name("X");
+    auto *iconOpt =
+      buildExport->add_option("--icon", ExportOption.iconPath, _("Uab icon (optional)"))
+        ->type_name("FILE")
+        ->check(CLI::ExistingFile);
+    auto *fullOpt = buildExport->add_flag("--full", ExportOption.full, _("Export uab fully"));
+    auto *layerFlag = buildExport->add_flag("--layer", layerMode, _("Export to linyaps layer file"))
+                        ->excludes(iconOpt, fullOpt);
+    std::string appLoader;
+    buildExport->add_option("--loader", appLoader, _("Use custom loader"))
       ->type_name("FILE")
-      ->check(CLI::ExistingFile);
-    buildExport->add_flag("--layer", layerMode, _("Export to linyaps layer file"));
+      ->check(CLI::ExistingFile)
+      ->excludes(layerFlag, fullOpt);
 
     // build push
-    std::string repoName, repoUrl, pushModule;
-    auto buildPush = commandParser.add_subcommand("push", _("Push linyaps app to remote repo"));
+    std::string pushModule;
+    linglong::cli::RepoOptions repoOptions;
+    auto *buildPush = commandParser.add_subcommand("push", _("Push linyaps app to remote repo"));
     buildPush->usage(_("Usage: ll-builder push [OPTIONS]"));
     buildPush->add_option("-f, --file", filePath, _("File path of the linglong.yaml"))
       ->type_name("FILE")
       ->capture_default_str()
       ->check(CLI::ExistingFile);
-    buildPush->add_option("--repo-url", repoUrl, _("Remote repo url"))
+    buildPush->add_option("--repo-url", repoOptions.repoUrl, _("Remote repo url"))
       ->type_name("URL")
       ->check(validatorString);
-    buildPush->add_option("--repo-name", repoName, _("Remote repo name"))
+    buildPush->add_option("--repo-name", repoOptions.repoName, _("Remote repo name"))
       ->type_name("NAME")
       ->check(validatorString);
     buildPush->add_option("--module", pushModule, _("Push single module"))->check(validatorString);
@@ -322,6 +338,16 @@ You can report bugs to the linyaps team under this project: https://github.com/O
       ->type_name("FILE")
       ->required()
       ->check(CLI::ExistingFile);
+
+    // add build importDir
+    std::string layerDir;
+    auto buildImportDir =
+      commandParser.add_subcommand("import-dir", _("Import linyaps layer dir to build repo"))
+        ->group(hiddenGroup);
+    buildImportDir->usage(_("Usage: ll-builder import-dir PATH"));
+    buildImportDir->add_option("PATH", layerDir, _("Layer dir path"))
+      ->type_name("PATH")
+      ->required();
 
     // add build extract
     std::string dir;
@@ -340,27 +366,30 @@ You can report bugs to the linyaps team under this project: https://github.com/O
     // add repo sub command add
     auto buildRepoAdd = buildRepo->add_subcommand("add", _("Add a new repository"));
     buildRepoAdd->usage(_("Usage: ll-builder repo add [OPTIONS] NAME URL"));
-    buildRepoAdd->add_option("NAME", repoName, _("Specify the repo name"))
+    buildRepoAdd->add_option("NAME", repoOptions.repoName, _("Specify the repo name"))
       ->required()
       ->check(validatorString);
-    buildRepoAdd->add_option("URL", repoUrl, _("Url of the repository"))
+    buildRepoAdd->add_option("URL", repoOptions.repoUrl, _("Url of the repository"))
       ->required()
+      ->check(validatorString);
+    buildRepoAdd->add_option("--alias", repoOptions.repoAlias, _("Alias of the repo name"))
+      ->type_name("ALIAS")
       ->check(validatorString);
 
     // add repo sub command remove
     auto buildRepoRemove = buildRepo->add_subcommand("remove", _("Remove a repository"));
     buildRepoRemove->usage(_("Usage: ll-builder repo remove [OPTIONS] NAME"));
-    buildRepoRemove->add_option("NAME", repoName, _("Specify the repo name"))
+    buildRepoRemove->add_option("Alias", repoOptions.repoAlias, _("Alias of the repo name"))
       ->required()
       ->check(validatorString);
 
     // add repo sub command update
     auto buildRepoUpdate = buildRepo->add_subcommand("update", _("Update the repository URL"));
     buildRepoUpdate->usage(_("Usage: ll-builder repo update [OPTIONS] NAME URL"));
-    buildRepoUpdate->add_option("NAME", repoName, _("Specify the repo name"))
+    buildRepoUpdate->add_option("Alias", repoOptions.repoAlias, _("Alias of the repo name"))
       ->required()
       ->check(validatorString);
-    buildRepoUpdate->add_option("URL", repoUrl, _("Url of the repository"))
+    buildRepoUpdate->add_option("URL", repoOptions.repoUrl, _("Url of the repository"))
       ->required()
       ->check(validatorString);
 
@@ -368,7 +397,7 @@ You can report bugs to the linyaps team under this project: https://github.com/O
     auto buildRepoSetDefault =
       buildRepo->add_subcommand("set-default", _("Set a default repository name"));
     buildRepoSetDefault->usage(_("Usage: ll-builder repo set-default [OPTIONS] NAME"));
-    buildRepoSetDefault->add_option("NAME", repoName, _("Specify the repo name"))
+    buildRepoSetDefault->add_option("Alias", repoOptions.repoAlias, _("Alias of the repo name"))
       ->required()
       ->check(validatorString);
 
@@ -490,14 +519,31 @@ You can report bugs to the linyaps team under this project: https://github.com/O
                 << oldPtr << ", all data will be pulled again.";
     }
 
-    linglong::repo::ClientFactory clientFactory(repoCfg->repos[repoCfg->defaultRepo]);
+    const auto defaultRepo = linglong::repo::getDefaultRepo(*repoCfg);
+    linglong::repo::ClientFactory clientFactory(defaultRepo.url);
     auto repoRoot = QDir{ QString::fromStdString(builderCfg->repo) };
     if (!repoRoot.exists() && !repoRoot.mkpath(".")) {
         qCritical() << "failed to create the repository of builder.";
         return -1;
     }
 
+    // set GIO_USE_VFS to local, avoid glib start thread
+    char *oldEnv = getenv("GIO_USE_VFS");
+    if (-1 == setenv("GIO_USE_VFS", "local", 1)) {
+        qWarning() << "failed to GIO_USE_VFS to local" << errno;
+    }
+
     linglong::repo::OSTreeRepo repo(repoRoot, *repoCfg, clientFactory);
+
+    if (oldEnv) {
+        if (-1 == setenv("GIO_USE_VFS", oldEnv, 1)) {
+            qWarning() << "failed to restore GIO_USE_VFS" << errno;
+        }
+    } else {
+        if (-1 == unsetenv("GIO_USE_VFS")) {
+            qWarning() << "failed to restore GIO_USE_VFS" << errno;
+        }
+    }
 
     // if user use old opt(--exec) passing parameters, pass it to the new commands;
     if (newCommands.empty() && !oldCommands.empty()) {
@@ -579,39 +625,58 @@ You can report bugs to the linyaps team under this project: https://github.com/O
         if (buildRepoShow->parsed()) {
             const auto &cfg = repo.getConfig();
             // Note: keep the same format as ll-cli repo
+            size_t maxUrlLength = 0;
+            for (const auto &repo : cfg.repos) {
+                maxUrlLength = std::max(maxUrlLength, repo.url.size());
+            }
             std::cout << "Default: " << cfg.defaultRepo << std::endl;
             std::cout << std::left << std::setw(11) << "Name";
-            std::cout << "Url" << std::endl;
-            for (const auto &r : cfg.repos) {
-                std::cout << std::left << std::setw(10) << r.first << " " << r.second << std::endl;
+            std::cout << std::setw(maxUrlLength + 2) << "Url" << std::setw(11) << "Alias"
+                      << std::endl;
+            for (const auto &repo : cfg.repos) {
+                std::cout << std::left << std::setw(11) << repo.name << std::setw(maxUrlLength + 2)
+                          << repo.url << std::setw(11) << repo.alias.value_or(repo.name)
+                          << std::endl;
             }
             return 0;
         }
 
         auto newCfg = repo.getConfig();
 
-        if (!repoUrl.empty()) {
-            if (repoUrl.rfind("http", 0) != 0) {
+        if (!repoOptions.repoUrl.empty()) {
+            if (repoOptions.repoUrl.rfind("http", 0) != 0) {
                 std::cerr << "url is invalid." << std::endl;
                 return EINVAL;
             }
 
-            if (repoUrl.back() == '/') {
-                repoUrl.pop_back();
+            if (repoOptions.repoUrl.back() == '/') {
+                repoOptions.repoUrl.pop_back();
             }
         }
 
+        std::string name = repoOptions.repoName;
+        std::string alias = repoOptions.repoAlias.value_or(name);
+
         if (buildRepoAdd->parsed()) {
-            if (repoUrl.empty()) {
+            if (repoOptions.repoUrl.empty()) {
                 std::cerr << "url is empty." << std::endl;
                 return EINVAL;
             }
 
-            auto node = newCfg.repos.try_emplace(repoName, repoUrl);
-            if (!node.second) {
-                std::cerr << "repo " + repoName + " already exist." << std::endl;
+            bool isExist =
+              std::any_of(newCfg.repos.begin(), newCfg.repos.end(), [&alias](const auto &repo) {
+                  return repo.alias.value_or(repo.name) == alias;
+              });
+            if (isExist) {
+                std::cerr << "repo " + alias + " already exist." << std::endl;
                 return -1;
             }
+
+            newCfg.repos.push_back(linglong::api::types::v1::Repo{
+              .alias = repoOptions.repoAlias,
+              .name = repoOptions.repoName,
+              .url = repoOptions.repoUrl,
+            });
 
             auto ret = repo.setConfig(newCfg);
             if (!ret) {
@@ -622,15 +687,19 @@ You can report bugs to the linyaps team under this project: https://github.com/O
             return 0;
         }
 
-        auto existingRepo = newCfg.repos.find(repoName);
+        auto existingRepo =
+          std::find_if(newCfg.repos.begin(), newCfg.repos.end(), [&alias](const auto &repo) {
+              return repo.alias.value_or(repo.name) == alias;
+          });
+
         if (existingRepo == newCfg.repos.cend()) {
-            std::cerr << "the operated repo " + repoName + " doesn't exist." << std::endl;
+            std::cerr << "the operated repo " + alias + " doesn't exist." << std::endl;
             return -1;
         }
 
         if (buildRepoRemove->parsed()) {
-            if (newCfg.defaultRepo == repoName) {
-                std::cerr << "repo " + repoName
+            if (newCfg.defaultRepo == alias) {
+                std::cerr << "repo " + alias
                     + "is default repo, please change default repo before removing it.";
                 return -1;
             }
@@ -646,12 +715,12 @@ You can report bugs to the linyaps team under this project: https://github.com/O
         }
 
         if (buildRepoUpdate->parsed()) {
-            if (repoUrl.empty()) {
+            if (repoOptions.repoUrl.empty()) {
                 std::cerr << "url is empty." << std::endl;
                 return -1;
             }
 
-            existingRepo->second = repoUrl;
+            existingRepo->url = repoOptions.repoUrl;
             auto ret = repo.setConfig(newCfg);
             if (!ret) {
                 std::cerr << ret.error().message().toStdString() << std::endl;
@@ -662,8 +731,8 @@ You can report bugs to the linyaps team under this project: https://github.com/O
         }
 
         if (buildRepoSetDefault->parsed()) {
-            if (newCfg.defaultRepo != repoName) {
-                newCfg.defaultRepo = repoName;
+            if (newCfg.defaultRepo != alias) {
+                newCfg.defaultRepo = alias;
                 auto ret = repo.setConfig(newCfg);
                 if (!ret) {
                     std::cerr << ret.error().message().toStdString() << std::endl;
@@ -716,7 +785,7 @@ You can report bugs to the linyaps team under this project: https://github.com/O
 
         builder.setBuildOptions(options);
 
-        auto result = builder.run(modules, exec, debug);
+        auto result = builder.run(modules, exec, std::nullopt, debug);
         if (!result) {
             qCritical() << result.error();
             return -1;
@@ -740,7 +809,12 @@ You can report bugs to the linyaps team under this project: https://github.com/O
                                            *builderCfg);
 
         if (layerMode) {
-            auto result = builder.exportLayer(QDir::currentPath());
+            // layer 默认使用lzma有更高压缩率
+            QString compressor = "lzma";
+            if (!ExportOption.compressor.empty()) {
+                compressor = ExportOption.compressor.c_str();
+            }
+            auto result = builder.exportLayer(QDir::currentPath(), compressor);
             if (!result) {
                 qCritical() << result.error();
                 return -1;
@@ -749,10 +823,15 @@ You can report bugs to the linyaps team under this project: https://github.com/O
             return 0;
         }
 
-        auto result = builder.exportUAB(QDir::currentPath(),
-                                        { .iconPath = QString::fromStdString(iconFile),
-                                          .exportDevelop = true,
-                                          .exportI18n = true });
+        if (!appLoader.empty()) {
+            ExportOption.loader = appLoader;
+        }
+        // uab 默认使用lz4可以更快解压速度，避免影响应用自运行
+        QString compressor = "lz4";
+        if (!ExportOption.compressor.empty()) {
+            compressor = ExportOption.compressor.c_str();
+        }
+        auto result = builder.exportUAB(QDir::currentPath(), ExportOption);
         if (!result) {
             qCritical() << result.error();
             return -1;
@@ -782,6 +861,16 @@ You can report bugs to the linyaps team under this project: https://github.com/O
         return 0;
     }
 
+    if (buildImportDir->parsed()) {
+        auto result =
+          linglong::builder::Builder::importLayer(repo, QString::fromStdString(layerDir));
+        if (!result) {
+            qCritical() << result.error();
+            return -1;
+        }
+        return 0;
+    }
+
     if (buildPush->parsed()) {
         auto project =
           parseProjectConfig(QDir().absoluteFilePath(QString::fromStdString(filePath)));
@@ -796,7 +885,7 @@ You can report bugs to the linyaps team under this project: https://github.com/O
                                            *containerBuilder,
                                            *builderCfg);
         if (!pushModule.empty()) {
-            auto result = builder.push(pushModule, repoUrl, repoName);
+            auto result = builder.push(pushModule, repoOptions.repoUrl, repoOptions.repoName);
             if (!result) {
                 qCritical() << result.error();
                 return -1;
@@ -813,7 +902,7 @@ You can report bugs to the linyaps team under this project: https://github.com/O
             }
         }
         for (const auto &module : modules) {
-            auto result = builder.push(module, repoUrl, repoName);
+            auto result = builder.push(module, repoOptions.repoUrl, repoOptions.repoName);
             if (!result) {
                 qCritical() << result.error();
                 return -1;

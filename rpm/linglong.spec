@@ -1,17 +1,19 @@
+%global debug_package %{nil}
 Name:           linglong
 Version:        1.4.3
 Release:        1
 Summary:        Linglong Package FrameWork
 License:        LGPLv3
 URL:            https://github.com/linuxdeepin/%{name}
-Source0:        %{url}/archive/%{version}/linglong-%{version}.tar.gz
+Source0:        %{url}/archive/%{version}/linglong-%{version}.tar
 
 BuildRequires:  cmake gcc-c++
 BuildRequires:  qt5-qtbase-devel qt5-qtbase-private-devel
 BuildRequires:  glib2-devel nlohmann-json-devel ostree-devel yaml-cpp-devel
 BuildRequires:  systemd-devel gtest-devel libseccomp-devel elfutils-libelf-devel
 BuildRequires:  glibc-static libstdc++-static
-BuildRequires:  libcurl-devel openssl-devel
+BuildRequires:  libcurl-devel openssl-devel libcap-devel
+BuildRequires:  gtest-devel gmock-devel
 Requires:       linglong-bin = %{version}-%{release}
 
 %description
@@ -43,6 +45,7 @@ Linglong sandbox with OCI standard.
 export PATH=%{_qt5_bindir}:$PATH
 mkdir build && cd build
 cmake -DCMAKE_INSTALL_PREFIX:PATH=%{_prefix} \
+      -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
       -DINCLUDE_INSTALL_DIR:PATH=%{_includedir} \
       -DLIB_INSTALL_DIR:PATH=%{_libdir} \
       -DSYSCONF_INSTALL_DIR:PATH=%{_sysconfdir} \
@@ -84,22 +87,22 @@ cd build
 %{_prefix}/lib/systemd/system-preset/*.preset
 %{_prefix}/lib/systemd/user/*
 %{_prefix}/lib/systemd/system-environment-generators/*
+%{_prefix}/lib/systemd/user-generators/*
 %{_libexecdir}/%{name}/ll-package-manager
-%{_libexecdir}/%{name}/00-id-mapping-static
-%{_libexecdir}/%{name}/05-initialize-static
-%{_libexecdir}/%{name}/20-devices-static
-%{_libexecdir}/%{name}/25-host-env-static
-%{_libexecdir}/%{name}/30-user-home-static
-%{_libexecdir}/%{name}/40-host-ipc-static
-%{_libexecdir}/%{name}/90-legacy-static
 %{_libexecdir}/%{name}/ll-session-helper
+%{_libexecdir}/%{name}/ld-cache-generator
+%{_libexecdir}/%{name}/font-cache-generator
+%{_libexecdir}/%{name}/ll-dialog
+%{_libexecdir}/%{name}/dialog/99-linglong-permission
 %{_datadir}/bash-completion/completions/ll-cli
+%{_datadir}/zsh/vendor-completions/_ll-cli
 %{_datadir}/dbus-1/system-services/*.service
 %{_datadir}/dbus-1/system.d/*.conf
 %{_datadir}/polkit-1/actions/org.deepin.linglong.PackageManager1.policy
 %{_datadir}/%{name}/config.yaml
 %{_datadir}/mime/packages/*
 %{_datadir}/locale/*
+%{_datadir}/applications/*
 
 %files -n linglong-builder
 %license LICENSE
@@ -112,6 +115,7 @@ cd build
 %{_libexecdir}/%{name}/builder/helper/*.sh
 %{_datadir}/bash-completion/completions/ll-builder
 %{_datadir}/%{name}/builder/templates/*.yaml
+%{_datadir}/%{name}/builder/uab/*
 
 %files -n linglong-box
 %license LICENSE

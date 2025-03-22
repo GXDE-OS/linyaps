@@ -18,7 +18,9 @@
 #include "linglong/repo/config.h"
 #include "linglong/utils/command/env.h"
 #include "linglong/utils/error/error.h"
+#include "linglong/utils/file.h"
 #include "linglong/utils/finally/finally.h"
+#include "linglong/utils/gkeyfile_wrapper.h"
 #include "linglong/utils/packageinfo_handler.h"
 #include "linglong/utils/transaction.h"
 
@@ -35,6 +37,7 @@
 #include <QProcess>
 #include <QTemporaryDir>
 #include <QTimer>
+#include <QtGlobal>
 
 #include <algorithm>
 #include <chrono>
@@ -47,8 +50,10 @@
 #include <map>
 #include <memory>
 #include <string>
+#include <system_error>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -353,51 +358,61 @@ utils::error::Result<QString> commitDirToRepo(std::vector<GFile *> dirs,
     return commit;
 }
 
-utils::error::Result<void> updateOstreeRepoConfig(OstreeRepo *repo,
-                                                  const QString &remoteName,
-                                                  const QString &url,
-                                                  const QString &parent = "") noexcept
+utils::error::Result<void>
+updateOstreeRepoConfig(OstreeRepo *repo,
+                       const linglong::api::types::v1::RepoConfigV2 &config,
+                       const QString &parent = "") noexcept
 {
     LINGLONG_TRACE("update configuration");
 
-    g_autoptr(GVariant) options = NULL;
-    GVariantBuilder builder;
-    g_variant_builder_init(&builder, G_VARIANT_TYPE("a{sv}"));
-    g_variant_builder_add(&builder, "{sv}", "gpg-verify", g_variant_new_boolean(FALSE));
-    // NOTE:
-    // libcurl 8.2.1 has a http2 bug https://github.com/curl/curl/issues/11859
-    // We disable http2 for now.
-    g_variant_builder_add(&builder, "{sv}", "http2", g_variant_new_boolean(FALSE));
-    options = g_variant_ref_sink(g_variant_builder_end(&builder));
-
     g_autoptr(GError) gErr = nullptr;
-    if (ostree_repo_remote_change(repo,
-                                  nullptr,
-                                  OSTREE_REPO_REMOTE_CHANGE_DELETE_IF_EXISTS,
-                                  remoteName.toUtf8(),
-                                  nullptr,
-                                  nullptr,
-                                  nullptr,
-                                  &gErr)
-        == FALSE) {
-        return LINGLONG_ERR("ostree_repo_remote_change", gErr);
+
+    g_auto(GStrv) remoteNames = ostree_repo_remote_list(repo, nullptr);
+
+    // 删除全部仓库
+    if (remoteNames != nullptr) {
+        for (auto remoteName = remoteNames; *remoteName != nullptr; remoteName++) {
+            if (ostree_repo_remote_change(repo,
+                                          nullptr,
+                                          OSTREE_REPO_REMOTE_CHANGE_DELETE,
+                                          *remoteName,
+                                          nullptr,
+                                          nullptr,
+                                          nullptr,
+                                          &gErr)
+                == FALSE) {
+                return LINGLONG_ERR("ostree_repo_remote_change", gErr);
+            }
+        }
     }
 
-    if (ostree_repo_remote_change(repo,
-                                  nullptr,
-                                  OSTREE_REPO_REMOTE_CHANGE_ADD,
-                                  remoteName.toUtf8(),
-                                  (url + "/repos/" + remoteName).toUtf8(),
-                                  options,
-                                  nullptr,
-                                  &gErr)
-        == FALSE) {
-        return LINGLONG_ERR("ostree_repo_remote_change", gErr);
+    for (const auto &repoCfg : config.repos) {
+        const std::string &remoteUrl = repoCfg.url + "/repos/" + repoCfg.name;
+        g_autoptr(GVariant) options = NULL;
+        GVariantBuilder builder;
+        g_variant_builder_init(&builder, G_VARIANT_TYPE("a{sv}"));
+        g_variant_builder_add(&builder, "{sv}", "gpg-verify", g_variant_new_boolean(FALSE));
+        // NOTE:
+        // libcurl 8.2.1 has a http2 bug https://github.com/curl/curl/issues/11859
+        // We disable http2 for now.
+        g_variant_builder_add(&builder, "{sv}", "http2", g_variant_new_boolean(FALSE));
+        options = g_variant_ref_sink(g_variant_builder_end(&builder));
+
+        if (ostree_repo_remote_change(repo,
+                                      nullptr,
+                                      OSTREE_REPO_REMOTE_CHANGE_ADD,
+                                      repoCfg.alias.value_or(repoCfg.name).c_str(),
+                                      remoteUrl.c_str(),
+                                      options,
+                                      nullptr,
+                                      &gErr)
+            == FALSE) {
+            return LINGLONG_ERR("ostree_repo_remote_change", gErr);
+        }
     }
 
     GKeyFile *configKeyFile = ostree_repo_get_config(repo);
     Q_ASSERT(configKeyFile != nullptr);
-    QDir a;
 
     g_key_file_set_string(configKeyFile, "core", "min-free-space-size", "600MB");
     if (!parent.isEmpty()) {
@@ -413,10 +428,10 @@ utils::error::Result<void> updateOstreeRepoConfig(OstreeRepo *repo,
     return LINGLONG_OK;
 }
 
-utils::error::Result<OstreeRepo *> createOstreeRepo(const QDir &location,
-                                                    const QString &remoteName,
-                                                    const QString &url,
-                                                    const QString &parent = "") noexcept
+utils::error::Result<OstreeRepo *>
+createOstreeRepo(const QDir &location,
+                 const linglong::api::types::v1::RepoConfigV2 &config,
+                 const QString &parent = "") noexcept
 {
     LINGLONG_TRACE("create linglong repository at " + location.absolutePath());
 
@@ -431,11 +446,12 @@ utils::error::Result<OstreeRepo *> createOstreeRepo(const QDir &location,
     repoPath = g_file_new_for_path(location.absolutePath().toUtf8());
     ostreeRepo = ostree_repo_new(repoPath);
     Q_ASSERT(ostreeRepo != nullptr);
+
     if (ostree_repo_create(ostreeRepo, OSTREE_REPO_MODE_BARE_USER_ONLY, nullptr, &gErr) == FALSE) {
         return LINGLONG_ERR("ostree_repo_create", gErr);
     }
 
-    auto result = updateOstreeRepoConfig(ostreeRepo, remoteName, url, parent);
+    auto result = updateOstreeRepoConfig(ostreeRepo, config, parent);
 
     if (!result) {
         return LINGLONG_ERR(result);
@@ -455,7 +471,7 @@ utils::error::Result<package::Reference> clearReferenceLocal(const linglong::rep
         if (!curArch) {
             return LINGLONG_ERR(curArch);
         }
-        if (curArch->toString() != fuzzy.arch->toString()) {
+        if (curArch != *fuzzy.arch) {
             return LINGLONG_ERR("arch mismatch with host arch");
         }
     }
@@ -480,7 +496,7 @@ utils::error::Result<package::Reference> clearReferenceLocal(const linglong::rep
         auto ver = QString::fromStdString(ref.info.version);
         auto pkgVer = linglong::package::Version::parse(ver);
         if (!pkgVer) {
-            qFatal("internal error: broken data of repo cache: %s", ver.toStdString().c_str());
+            qFatal("internal error: broken data of repo cache: %s", ref.info.version.c_str());
         }
 
         qDebug() << "available layer found:" << fuzzy.toString() << ver;
@@ -666,9 +682,9 @@ QDir OSTreeRepo::ostreeRepoDir() const noexcept
 }
 
 OSTreeRepo::OSTreeRepo(const QDir &path,
-                       const api::types::v1::RepoConfig &cfg,
+                       api::types::v1::RepoConfigV2 cfg,
                        ClientFactory &clientFactory) noexcept
-    : cfg(cfg)
+    : cfg(std::move(cfg))
     , m_clientFactory(clientFactory)
 {
     if (!path.exists()) {
@@ -691,19 +707,11 @@ OSTreeRepo::OSTreeRepo(const QDir &path,
     {
         LINGLONG_TRACE("use linglong repo at " + path.absolutePath());
 
-        repoPath = g_file_new_for_path(this->ostreeRepoDir().absolutePath().toUtf8());
+        repoPath = g_file_new_for_path(this->ostreeRepoDir().absolutePath().toLocal8Bit());
         ostreeRepo = ostree_repo_new(repoPath);
         Q_ASSERT(ostreeRepo != nullptr);
         if (ostree_repo_open(ostreeRepo, nullptr, &gErr) == TRUE) {
-            auto result =
-              updateOstreeRepoConfig(ostreeRepo,
-                                     QString::fromStdString(cfg.defaultRepo),
-                                     QString::fromStdString(cfg.repos.at(cfg.defaultRepo)));
-            if (!result) {
-                // when ll-cli construct this object, it has no permission to wirte ostree config
-                // we can't abort here.
-                qDebug() << LINGLONG_ERRV(result);
-            }
+
             this->ostreeRepo.reset(static_cast<OstreeRepo *>(g_steal_pointer(&ostreeRepo)));
 
             auto ret = linglong::repo::RepoCache::create(
@@ -719,17 +727,13 @@ OSTreeRepo::OSTreeRepo(const QDir &path,
             return;
         }
 
-        qDebug() << LINGLONG_ERRV("ostree_repo_open", gErr);
-
         g_clear_error(&gErr);
         g_clear_object(&ostreeRepo);
     }
 
     LINGLONG_TRACE("init ostree-based linglong repository");
 
-    auto result = createOstreeRepo(this->ostreeRepoDir().absolutePath(),
-                                   QString::fromStdString(this->cfg.defaultRepo),
-                                   QString::fromStdString(this->cfg.repos[this->cfg.defaultRepo]));
+    auto result = createOstreeRepo(this->ostreeRepoDir().absolutePath(), this->cfg);
     if (!result) {
         qCritical() << LINGLONG_ERRV(result);
         qFatal("abort");
@@ -749,13 +753,13 @@ OSTreeRepo::OSTreeRepo(const QDir &path,
     this->cache = std::move(ret).value();
 }
 
-const api::types::v1::RepoConfig &OSTreeRepo::getConfig() const noexcept
+const api::types::v1::RepoConfigV2 &OSTreeRepo::getConfig() const noexcept
 {
     return cfg;
 }
 
 utils::error::Result<void>
-OSTreeRepo::updateConfig(const api::types::v1::RepoConfig &newCfg) noexcept
+OSTreeRepo::updateConfig(const api::types::v1::RepoConfigV2 &newCfg) noexcept
 {
     LINGLONG_TRACE("update underlying config")
 
@@ -765,14 +769,9 @@ OSTreeRepo::updateConfig(const api::types::v1::RepoConfig &newCfg) noexcept
     }
 
     utils::Transaction transaction;
-    result = updateOstreeRepoConfig(this->ostreeRepo.get(),
-                                    QString::fromStdString(newCfg.defaultRepo),
-                                    QString::fromStdString(newCfg.repos.at(newCfg.defaultRepo)));
+    result = updateOstreeRepoConfig(this->ostreeRepo.get(), newCfg);
     transaction.addRollBack([this]() noexcept {
-        auto result =
-          updateOstreeRepoConfig(this->ostreeRepo.get(),
-                                 QString::fromStdString(this->cfg.defaultRepo),
-                                 QString::fromStdString(this->cfg.repos.at(this->cfg.defaultRepo)));
+        auto result = updateOstreeRepoConfig(this->ostreeRepo.get(), this->cfg);
         if (!result) {
             qCritical() << result.error();
             Q_ASSERT(false);
@@ -784,13 +783,14 @@ OSTreeRepo::updateConfig(const api::types::v1::RepoConfig &newCfg) noexcept
 
     transaction.commit();
 
-    this->m_clientFactory.setServer(QString::fromStdString(newCfg.repos.at(newCfg.defaultRepo)));
+    const auto newRepo = getDefaultRepo(newCfg);
+    this->m_clientFactory.setServer(QString::fromStdString(newRepo.url));
     this->cfg = newCfg;
 
     return LINGLONG_OK;
 }
 
-utils::error::Result<void> OSTreeRepo::setConfig(const api::types::v1::RepoConfig &cfg) noexcept
+utils::error::Result<void> OSTreeRepo::setConfig(const api::types::v1::RepoConfigV2 &cfg) noexcept
 {
     LINGLONG_TRACE("set config");
 
@@ -807,18 +807,12 @@ utils::error::Result<void> OSTreeRepo::setConfig(const api::types::v1::RepoConfi
             Q_ASSERT(false);
         }
     });
-
-    result = updateOstreeRepoConfig(this->ostreeRepo.get(),
-                                    QString::fromStdString(cfg.defaultRepo),
-                                    QString::fromStdString(cfg.repos.at(cfg.defaultRepo)));
+    result = updateOstreeRepoConfig(this->ostreeRepo.get(), cfg);
     if (!result) {
         return LINGLONG_ERR(result);
     }
     transaction.addRollBack([this]() noexcept {
-        auto result =
-          updateOstreeRepoConfig(this->ostreeRepo.get(),
-                                 QString::fromStdString(this->cfg.defaultRepo),
-                                 QString::fromStdString(this->cfg.repos.at(this->cfg.defaultRepo)));
+        auto result = updateOstreeRepoConfig(this->ostreeRepo.get(), this->cfg);
         if (!result) {
             qCritical() << result.error();
             Q_ASSERT(false);
@@ -829,7 +823,8 @@ utils::error::Result<void> OSTreeRepo::setConfig(const api::types::v1::RepoConfi
         return LINGLONG_ERR(ret);
     }
 
-    this->m_clientFactory.setServer(cfg.repos.at(cfg.defaultRepo));
+    const auto newRepo = getDefaultRepo(cfg);
+    this->m_clientFactory.setServer(newRepo.url);
     this->cfg = cfg;
 
     transaction.commit();
@@ -924,9 +919,8 @@ OSTreeRepo::importLayerDir(const package::LayerDir &dir,
 [[nodiscard]] utils::error::Result<void> OSTreeRepo::push(const package::Reference &reference,
                                                           const std::string &module) const noexcept
 {
-    const auto &remoteRepo = this->cfg.defaultRepo;
-    const auto &remoteURL = this->cfg.repos.at(remoteRepo);
-    return pushToRemote(remoteRepo, remoteURL, reference, module);
+    const auto defaultRepo = getDefaultRepo(this->cfg);
+    return pushToRemote(defaultRepo.name, defaultRepo.url, reference, module);
 }
 
 utils::error::Result<void> OSTreeRepo::pushToRemote(const std::string &remoteRepo,
@@ -935,15 +929,15 @@ utils::error::Result<void> OSTreeRepo::pushToRemote(const std::string &remoteRep
                                                     const std::string &module) const noexcept
 {
     LINGLONG_TRACE("push " + reference.toString());
-    qDebug() << "push" << reference.toString() << "to" << url.c_str();
     auto layerDir = this->getLayerDir(reference, module);
     if (!layerDir) {
         return LINGLONG_ERR("layer not found", layerDir);
     }
     auto env = QProcessEnvironment::systemEnvironment();
     auto client = this->m_clientFactory.createClientV2();
-    // apiClient会调用free释放basePath，为避免重复释放这里复制一次url
-    client->basePath = strdup(client->basePath);
+    free(client->basePath); // NOLINT
+    client->basePath = strdup(url.c_str());
+
     // 登录认证
     auto envUsername = env.value("LINGLONG_USERNAME").toUtf8();
     auto envPassword = env.value("LINGLONG_PASSWORD").toUtf8();
@@ -1041,6 +1035,10 @@ utils::error::Result<void> OSTreeRepo::remove(const package::Reference &ref,
 {
     LINGLONG_TRACE("remove " + ref.toString());
 
+    if (module.empty()) {
+        return LINGLONG_ERR("module is empty");
+    }
+
     auto layer = this->getLayerItem(ref, module, subRef);
     if (!layer) {
         return LINGLONG_ERR(layer);
@@ -1120,7 +1118,8 @@ void OSTreeRepo::pull(service::PackageTask &taskContext,
 
     std::array<const char *, 2> refs{ refString.c_str(), nullptr };
     ostreeUserData data{ .taskContext = &taskContext };
-    auto *progress = ostree_async_progress_new_and_connect(progress_changed, (void *)&data);
+    g_autoptr(OstreeAsyncProgress) progress =
+      ostree_async_progress_new_and_connect(progress_changed, (void *)&data);
     Q_ASSERT(progress != nullptr);
 
     g_autoptr(GError) gErr = nullptr;
@@ -1139,12 +1138,14 @@ void OSTreeRepo::pull(service::PackageTask &taskContext,
 
     g_autoptr(GVariant) pull_options = g_variant_ref_sink(g_variant_builder_end(&builder));
     // 这里不能使用g_main_context_push_thread_default，因为会阻塞Qt的事件循环
-    auto status = ostree_repo_pull_with_options(this->ostreeRepo.get(),
-                                                this->cfg.defaultRepo.c_str(),
-                                                pull_options,
-                                                progress,
-                                                cancellable,
-                                                &gErr);
+    const auto defaultRepo = getDefaultRepo(this->cfg);
+    auto status =
+      ostree_repo_pull_with_options(this->ostreeRepo.get(),
+                                    defaultRepo.alias.value_or(defaultRepo.name).c_str(),
+                                    pull_options,
+                                    progress,
+                                    cancellable,
+                                    &gErr);
     ostree_async_progress_finish(progress);
     auto shouldFallback = false;
     if (status == FALSE) {
@@ -1158,7 +1159,8 @@ void OSTreeRepo::pull(service::PackageTask &taskContext,
     }
     // Note: this fallback is only for binary to runtime
     if (shouldFallback && (module == "binary" || module == "runtime")) {
-        auto *progress = ostree_async_progress_new_and_connect(progress_changed, (void *)&data);
+        g_autoptr(OstreeAsyncProgress) progress =
+          ostree_async_progress_new_and_connect(progress_changed, (void *)&data);
         Q_ASSERT(progress != nullptr);
         // fallback to old ref
         refString = ostreeSpecFromReference(reference, std::nullopt, module);
@@ -1181,7 +1183,7 @@ void OSTreeRepo::pull(service::PackageTask &taskContext,
         g_autoptr(GVariant) pull_options = g_variant_ref_sink(g_variant_builder_end(&builder));
 
         status = ostree_repo_pull_with_options(this->ostreeRepo.get(),
-                                               this->cfg.defaultRepo.c_str(),
+                                               defaultRepo.alias.value_or(defaultRepo.name).c_str(),
                                                pull_options,
                                                progress,
                                                cancellable,
@@ -1218,7 +1220,7 @@ void OSTreeRepo::pull(service::PackageTask &taskContext,
 
     item.commit = commit;
     item.info = *info;
-    item.repo = this->cfg.defaultRepo;
+    item.repo = defaultRepo.alias.value_or(defaultRepo.name);
 
     auto layerDir = this->ensureEmptyLayerDir(item.commit);
     if (!layerDir) {
@@ -1397,54 +1399,108 @@ OSTreeRepo::listRemote(const package::FuzzyReference &fuzzyRef) const noexcept
     LINGLONG_TRACE("list remote references");
 
     auto client = m_clientFactory.createClientV2();
-    std::string id, repo, channel, version, arch;
-    id = fuzzyRef.id.toStdString();
-    repo = this->cfg.defaultRepo;
-    if (fuzzyRef.channel) {
-        channel = fuzzyRef.channel->toStdString();
-    }
-    if (fuzzyRef.version) {
-        version = fuzzyRef.version->toString().toStdString();
-    }
-    if (fuzzyRef.arch) {
-        arch = fuzzyRef.arch->toString().toStdString();
-    } else {
-        arch = package::Architecture::currentCPUArchitecture()->toString().toStdString();
-    }
-    request_fuzzy_search_req_t req;
-    req.channel = channel.data();
-    req.version = version.data();
-    req.arch = arch.data();
-    req.app_id = id.data();
-    req.repo_name = repo.data();
-    // wait http request to finish
-    auto httpFuture = std::async(std::launch::async, [client, &req]() {
-        return ClientAPI_fuzzySearchApp(client.get(), &req);
+    request_fuzzy_search_req_t req{ nullptr, nullptr, nullptr, nullptr, nullptr };
+    auto freeIfNotNull = utils::finally::finally([&req] {
+        if (req.app_id != nullptr) {
+            free(req.app_id); // NOLINT
+        }
+        if (req.channel != nullptr) {
+            free(req.channel); // NOLINT
+        }
+        if (req.version != nullptr) {
+            free(req.version); // NOLINT
+        }
+        if (req.arch != nullptr) {
+            free(req.arch); // NOLINT
+        }
+        if (req.repo_name != nullptr) {
+            free(req.repo_name); // NOLINT
+        }
     });
-    QEventLoop loop;
-    QTimer timer;
-    connect(&timer, &QTimer::timeout, [&loop, &httpFuture]() {
-        if (httpFuture.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
-            loop.quit();
-        };
-    });
-    timer.start(100);
-    loop.exec();
 
-    auto res = httpFuture.get();
-    if (!res) {
-        return LINGLONG_ERR("cannot send request to remote server");
+    auto id = fuzzyRef.id.toLatin1();
+    req.app_id = ::strndup(id.data(), id.size());
+    if (req.app_id == nullptr) {
+        return LINGLONG_ERR(QString{ "strndup app_id failed: %1" }.arg(fuzzyRef.id));
     }
-    if (res->code != 200) {
-        auto msg = res->msg ? res->msg : "cannot send request to remote server";
+    const auto defaultRepo = getDefaultRepo(this->cfg);
+    req.repo_name = ::strndup(defaultRepo.name.data(), defaultRepo.name.size());
+    if (req.repo_name == nullptr) {
+        return LINGLONG_ERR(
+          QString{ "strndup repo_name failed: %1" }.arg(defaultRepo.name.c_str()));
+    }
+
+    if (fuzzyRef.channel) {
+        auto channel = fuzzyRef.channel->toLatin1();
+        req.channel = strndup(channel.data(), channel.size());
+        if (req.channel == nullptr) {
+            return LINGLONG_ERR(QString{ "strndup channel failed: %1" }.arg(channel.data()));
+        }
+    }
+
+    if (fuzzyRef.version) {
+        auto version = fuzzyRef.version->toString().toLatin1();
+        req.version = strndup(version.data(), version.size());
+        if (req.version == nullptr) {
+            return LINGLONG_ERR(QString{ "strndup version failed: %1" }.arg(version.data()));
+        }
+    }
+
+    auto defaultArch = package::Architecture::currentCPUArchitecture();
+    if (!defaultArch) {
+        return LINGLONG_ERR(defaultArch);
+    }
+
+    auto arch = fuzzyRef.arch.value_or(*defaultArch);
+    auto archStr = arch.toString().toLatin1();
+    req.arch = strndup(archStr.data(), archStr.size());
+    if (req.arch == nullptr) {
+        return LINGLONG_ERR(QString{ "strndup arch failed: %1" }.arg(archStr.data()));
+    }
+
+    // wait http request to finish
+    fuzzy_search_app_200_response_t *response{ nullptr };
+    QEventLoop loop;
+    auto job = std::thread(
+      [client, &loop, &response](request_fuzzy_search_req_t req) {
+          response = ClientAPI_fuzzySearchApp(client.get(), &req);
+          loop.exit();
+      },
+      req);
+    // transfer ownership
+    req.app_id = nullptr;
+    req.channel = nullptr;
+    req.version = nullptr;
+    req.arch = nullptr;
+    req.repo_name = nullptr;
+
+    loop.exec();
+    if (job.joinable()) {
+        job.join();
+    }
+
+    if (response == nullptr) {
+        return LINGLONG_ERR("failed to send request to remote server");
+    }
+    auto freeResponse = utils::finally::finally([&response] {
+        fuzzy_search_app_200_response_free(response);
+    });
+
+    if (response->code != 200) {
+        QString msg = (response->msg != nullptr)
+          ? response->msg
+          : QString{ "cannot send request to remote server: %1" }.arg(response->code);
         return LINGLONG_ERR(msg);
     }
-    if (!res->data) {
+
+    if (response->data == nullptr) {
         return {};
     }
-    auto pkgInfos = std::vector<api::types::v1::PackageInfoV2>{};
-    for (auto entry = res->data->firstEntry; entry != nullptr; entry = entry->nextListEntry) {
-        auto item = (request_register_struct_t *)entry->data;
+
+    std::vector<api::types::v1::PackageInfoV2> pkgInfos;
+    pkgInfos.reserve(response->data->count);
+    for (auto *entry = response->data->firstEntry; entry != nullptr; entry = entry->nextListEntry) {
+        auto *item = (request_register_struct_t *)entry->data;
         pkgInfos.emplace_back(api::types::v1::PackageInfoV2{
           .arch = { item->arch },
           .channel = item->channel,
@@ -1458,7 +1514,7 @@ OSTreeRepo::listRemote(const package::FuzzyReference &fuzzyRef) const noexcept
           .version = item->version,
         });
     }
-    fuzzy_search_app_200_response_free(res);
+
     return pkgInfos;
 }
 
@@ -1503,7 +1559,7 @@ void OSTreeRepo::unexportReference(const package::Reference &ref) noexcept
         return;
     }
 
-    QDir entriesDir = this->repoDir.absoluteFilePath("entries/share");
+    QDir entriesDir = this->repoDir.absoluteFilePath("entries");
     QDirIterator it(entriesDir.absolutePath(),
                     QDir::AllEntries | QDir::NoDot | QDir::NoDotDot | QDir::System,
                     QDirIterator::Subdirectories);
@@ -1531,12 +1587,39 @@ void OSTreeRepo::unexportReference(const package::Reference &ref) noexcept
             Q_ASSERT(false);
         }
     }
+
+    std::function<void(const QString &path)> removeEmptySubdirectories =
+      [&removeEmptySubdirectories](const QString &path) {
+          QDir dir(path);
+
+          // 获取目录下的所有子目录
+          QFileInfoList entries = dir.entryInfoList(QDir::Dirs | QDir::NoDotAndDotDot);
+
+          // 遍历子目录
+          for (const QFileInfo &entry : entries) {
+              QString subDirPath = entry.absoluteFilePath();
+
+              // 递归调用，先处理子目录
+              removeEmptySubdirectories(subDirPath);
+
+              // 检查子目录是否为空
+              QDir subDir(subDirPath);
+              if (subDir.isEmpty()) {
+                  // 如果子目录为空，则删除它
+                  if (!subDir.rmdir(subDirPath)) {
+                      qDebug() << "Failed to remove directory:" << subDirPath;
+                      continue;
+                  }
+              }
+          }
+      };
+    removeEmptySubdirectories(entriesDir.absolutePath());
     this->updateSharedInfo();
 }
 
 void OSTreeRepo::exportReference(const package::Reference &ref) noexcept
 {
-    auto entriesDir = QDir(this->repoDir.absoluteFilePath("entries/share"));
+    auto entriesDir = QDir(this->repoDir.absoluteFilePath("entries"));
     if (!entriesDir.exists()) {
         entriesDir.mkpath(".");
     }
@@ -1547,7 +1630,7 @@ void OSTreeRepo::exportReference(const package::Reference &ref) noexcept
         Q_ASSERT(false);
         return;
     }
-    auto ret = exportEntries(entriesDir, *item);
+    auto ret = exportEntries(entriesDir.absolutePath().toStdString(), *item);
     if (!ret.has_value()) {
         qCritical() << QString("Failed to export %1:").arg(ref.toString()) << ret.error().message();
         Q_ASSERT(false);
@@ -1556,111 +1639,251 @@ void OSTreeRepo::exportReference(const package::Reference &ref) noexcept
     this->updateSharedInfo();
 }
 
-utils::error::Result<void> OSTreeRepo::exportEntries(
-  const QDir &entriesDir, const api::types::v1::RepositoryCacheLayersItem &item) noexcept
+// 递归源目录所有文件，并在目标目录创建软链接，max_depth 控制递归深度以避免环形链接导致的无限递归
+utils::error::Result<void> OSTreeRepo::exportDir(const std::string &appID,
+                                                 const std::filesystem::path &source,
+                                                 const std::filesystem::path &destination,
+                                                 const int &max_depth)
 {
-    LINGLONG_TRACE(QString("export %1").arg(item.info.id.c_str()));
-    auto layerDir = getMergedModuleDir(item);
-    if (!layerDir.has_value()) {
-        return LINGLONG_ERR("get layer dir", layerDir);
-    }
-    auto layerEntriesDir = QDir(layerDir->absoluteFilePath("entries/share"));
-    if (!layerEntriesDir.exists()) {
-        qCritical() << QString("Failed to export %1:").arg(item.info.id.c_str()) << layerEntriesDir
-                    << "not exists.";
+    LINGLONG_TRACE(QString("export %1").arg(source.c_str()));
+    if (max_depth <= 0) {
+        qWarning() << "ttl reached, skipping export for" << source.c_str();
         return LINGLONG_OK;
     }
 
-    const QStringList exportPaths = {
-        "applications", // Copy desktop files
-        "mime",         // Copy MIME Type files
-        "icons",        // Icons
-        "dbus-1",       // D-Bus service files
-        "gnome-shell",  // Search providers
-        "appdata",      // Copy appdata/metainfo files (legacy path)
-        "metainfo",     // Copy appdata/metainfo files
-        "plugins",      // Copy plugins conf，The configuration files provided by some applications
-                        // maybe used by the host dde-file-manager.
-        "systemd",      // copy systemd service files
-        "deepin-manual",    // copy deepin-manual files
-        "deepin-elf-verify" // for uab signature
-    };
-
-    for (const auto &path : exportPaths) {
-        QDir exportDir = layerEntriesDir.absoluteFilePath(path);
-        if (!exportDir.exists()) {
+    std::error_code ec;
+    // 检查源目录是否存在
+    auto exists = std::filesystem::exists(source, ec);
+    if (ec) {
+        return LINGLONG_ERR("check source", ec);
+    }
+    if (!exists) {
+        return LINGLONG_ERR("source directory does not exist");
+    }
+    auto is_directory = std::filesystem::is_directory(source, ec);
+    if (ec) {
+        return LINGLONG_ERR("check source", ec);
+    }
+    if (!is_directory) {
+        return LINGLONG_ERR("source is not a directory");
+    }
+    // 检查目标目录是否存在，如果不存在则创建
+    exists = std::filesystem::exists(destination, ec);
+    if (ec) {
+        return LINGLONG_ERR(QString("Failed to check file existence: ") + destination.c_str(), ec);
+    }
+    // 如果目标非目录，则删除它并重新创建
+    if (exists && !std::filesystem::is_directory(destination, ec)) {
+        std::filesystem::remove(destination, ec);
+        if (ec) {
+            return LINGLONG_ERR(QString("Failed to remove file: ") + destination.c_str(), ec);
+        }
+        // 标记目标不存在
+        exists = false;
+    }
+    if (!exists) {
+        std::filesystem::create_directories(destination, ec);
+        if (ec) {
+            return LINGLONG_ERR(QString("Failed to create directory: ") + destination.c_str(), ec);
+        }
+    }
+    auto iterator = std::filesystem::directory_iterator(source, ec);
+    if (ec) {
+        return LINGLONG_ERR("list directory: " + source.string(), ec);
+    }
+    // 遍历源目录中的所有文件和子目录
+    for (const auto &entry : iterator) {
+        const auto &source_path = entry.path();
+        const auto &target_path = destination / source_path.filename();
+        // 跳过无效的软链接
+        exists = std::filesystem::exists(source_path, ec);
+        if (ec) {
+            return LINGLONG_ERR("check source existence" + source_path.string(), ec);
+        }
+        if (!exists) {
             continue;
         }
 
-        QDirIterator it(exportDir.absolutePath(),
-                        QDir::AllEntries | QDir::NoDotAndDotDot | QDir::System | QDir::Hidden,
-                        QDirIterator::Subdirectories | QDirIterator::FollowSymlinks);
-        while (it.hasNext()) {
-            it.next();
-            const auto info = it.fileInfo();
-            if (info.isDir()) {
-                continue;
-            }
-            // Check if the target file of the symbolic link exists.
-            if (info.isSymLink() && !std::filesystem::exists(info.symLinkTarget().toStdString())) {
-                qCritical() << "Invalid symlink: " << info.filePath();
-                continue;
-            }
-            // In KDE environment, every desktop should own the executable permission
-            // We just set the file permission to 0755 here.
-            if (info.suffix() == "desktop") {
-                if (!QFile::setPermissions(info.absoluteFilePath(),
-                                           QFileDevice::ReadOwner | QFileDevice::WriteOwner
-                                             | QFileDevice::ExeOwner | QFileDevice::ReadGroup
-                                             | QFileDevice::ExeGroup | QFileDevice::ReadOther
-                                             | QFileDevice::ExeOther)) {
-                    qCritical() << "Failed to chmod" << info.absoluteFilePath();
-                    Q_ASSERT(false);
-                }
-            }
-
-            const auto parentDirForLinkPath =
-              layerEntriesDir.relativeFilePath(it.fileInfo().dir().absolutePath());
-
-            if (!entriesDir.mkpath(parentDirForLinkPath)) {
-                qCritical() << "Failed to mkpath"
-                            << entriesDir.absoluteFilePath(parentDirForLinkPath);
-            }
-            auto from = std::filesystem::path{
-                entriesDir.absoluteFilePath(parentDirForLinkPath).toStdString()
-            } / it.fileName().toStdString();
-
-            QDir parentDir(entriesDir.absoluteFilePath(parentDirForLinkPath));
-            auto to = std::filesystem::path{
-                parentDir.relativeFilePath(info.absoluteFilePath()).toStdString()
-            };
-
-            std::error_code ec;
-            auto status = std::filesystem::symlink_status(from, ec);
-            if (ec && ec.value() != static_cast<int>(std::errc::no_such_file_or_directory)) {
-                qCritical() << "symlink_status" << from.c_str()
-                            << "error:" << QString::fromStdString(ec.message());
-                continue;
-            }
-
-            if (std::filesystem::exists(status)) {
-                qInfo() << from.c_str() << "symlink already exists, try to remove it";
-                if (!std::filesystem::remove(from, ec)) {
-                    qCritical() << "remove" << from.c_str()
-                                << "error:" << QString::fromStdString(ec.message());
-                    continue;
-                }
-            }
-
-            std::filesystem::create_symlink(to, from, ec);
+        // 如果是文件，创建符号链接
+        auto is_regular_file = std::filesystem::is_regular_file(source_path, ec);
+        if (ec) {
+            return LINGLONG_ERR("check file type: " + source_path.string(), ec);
+        }
+        if (is_regular_file) {
+            exists = std::filesystem::exists(target_path, ec);
             if (ec) {
-                qCritical().nospace()
-                  << "Failed to create link " << from.c_str() << " -> " << to.c_str() << " : "
-                  << QString::fromStdString(ec.message());
-                continue;
+                return LINGLONG_ERR("check file existence", ec);
+            }
+            if (exists) {
+                std::filesystem::remove(target_path, ec);
+                if (ec) {
+                    return LINGLONG_ERR("remove file failed", ec);
+                }
+            }
+
+            {
+                auto info = QFileInfo(target_path.c_str());
+                if ((info.path().contains("share/applications") && info.suffix() == "desktop")
+                    || (info.path().contains("share/dbus-1") && info.suffix() == "service")
+                    || (info.path().contains("share/systemd/user") && info.suffix() == "service")
+                    || (info.path().contains("share/applications/context-menus"))) {
+                    // We should not modify the files of the checked application directly, but
+                    // should copy them and then modify.
+                    auto timestamp = std::chrono::system_clock::now().time_since_epoch().count();
+                    auto sourceNewPath = QString{ "%1/%2_%3.%4" }
+                                           .arg((QFileInfo(source_path.c_str()).absolutePath()))
+                                           .arg(info.completeBaseName())
+                                           .arg(QString::fromStdString(std::to_string(timestamp)))
+                                           .arg(info.suffix())
+                                           .toStdString();
+                    std::filesystem::copy(source_path, sourceNewPath, ec);
+                    if (ec) {
+                        return LINGLONG_ERR("copy file failed: " + sourceNewPath, ec);
+                    }
+
+                    exists = std::filesystem::exists(sourceNewPath, ec);
+                    if (ec) {
+                        return LINGLONG_ERR("check file exists", ec);
+                    }
+
+                    if (!exists) {
+                        qWarning() << "failed to copy file: " << sourceNewPath.c_str();
+                        continue;
+                    }
+
+                    auto ret = IniLikeFileRewrite(QFileInfo(sourceNewPath.c_str()), appID.c_str());
+                    if (ret) {
+                        std::filesystem::rename(sourceNewPath, source_path, ec);
+                        if (ec) {
+                            return LINGLONG_ERR("rename new path", ec);
+                        }
+                    } else {
+                        qWarning() << "rewrite file failed: " << ret.error().message();
+                    }
+                }
+
+                // 此处应该采用相对路径创建软链接，采用绝对路径对于某些应用(帮助手册）在容器里面是无法访问的
+                std::filesystem::create_symlink(
+                  source_path.lexically_relative(target_path.parent_path()),
+                  target_path,
+                  ec);
+                if (ec) {
+                    return LINGLONG_ERR("create symlink failed: " + target_path.string(), ec);
+                }
+            }
+
+            continue;
+        }
+
+        // 如果是目录，进行递归导出
+        is_directory = std::filesystem::is_directory(source_path, ec);
+        if (ec) {
+            return LINGLONG_ERR("check file type", ec);
+        }
+        if (is_directory) {
+            auto ret = this->exportDir(appID, source_path, target_path, max_depth - 1);
+            if (!ret.has_value()) {
+                return ret;
+            }
+            continue;
+        }
+        // 其他情况，报错
+        qWarning() << "invalid file: " << source_path.c_str();
+    }
+    return LINGLONG_OK;
+}
+
+utils::error::Result<void>
+OSTreeRepo::exportEntries(const std::filesystem::path &rootEntriesDir,
+                          const api::types::v1::RepositoryCacheLayersItem &item) noexcept
+{
+    LINGLONG_TRACE(QString("export %1").arg(item.info.id.c_str()));
+    auto layerDir = getLayerDir(item);
+    if (!layerDir.has_value()) {
+        return LINGLONG_ERR("get layer dir", layerDir);
+    }
+    std::error_code ec;
+    // 检查目录是否存在
+    std::filesystem::path appEntriesDir = layerDir->absoluteFilePath("entries").toStdString();
+    auto exists = std::filesystem::exists(appEntriesDir, ec);
+    if (ec) {
+        return LINGLONG_ERR("check appEntriesDir exists", ec);
+    }
+    if (!exists) {
+        qCritical() << QString("Failed to export %1:").arg(item.info.id.c_str())
+                    << appEntriesDir.c_str() << "not exists.";
+        return LINGLONG_OK;
+    }
+    std::vector<std::string> exportPaths = {
+        "share/applications", // Copy desktop files
+        "share/mime",         // Copy MIME Type files
+        "share/icons",        // Icons
+        "share/dbus-1",       // D-Bus service files
+        "share/gnome-shell",  // Search providers
+        "share/appdata",      // Copy appdata/metainfo files (legacy path)
+        "share/metainfo",     // Copy appdata/metainfo files
+        "share/plugins", // Copy plugins conf，The configuration files provided by some applications
+                         // maybe used by the host dde-file-manager.
+        "share/deepin-manual",     // copy deepin-manual files
+        "share/deepin-elf-verify", // for uab signature
+        "share/dsg" // Copy dsg conf，the configuration file is used for self-developed
+                    // applications.
+    };
+    // 如果存在lib/systemd目录，则导出lib/systemd，否则导出share/systemd
+    exists = std::filesystem::exists(appEntriesDir / "lib/systemd", ec);
+    if (ec) {
+        return LINGLONG_ERR("Failed to check the existence of lib/systemd directory: {}", ec);
+    }
+    if (exists) {
+        exportPaths.push_back("lib/systemd");
+    } else {
+        exportPaths.push_back("share/systemd");
+    }
+    // 导出应用entries目录下的所有文件到玲珑仓库的entries目录下
+    for (const auto &path : exportPaths) {
+        auto source = appEntriesDir / path;
+        auto destination = rootEntriesDir / path;
+        // 将 share/systemd 目录下的文件导出到 lib/systemd 目录下
+        if (path == "share/systemd") {
+            destination = rootEntriesDir / "lib/systemd";
+        }
+        // 检查源目录是否存在，跳过不存在的目录
+        exists = std::filesystem::exists(source, ec);
+        if (ec) {
+            return LINGLONG_ERR(QString("Failed to check file existence: ") + source.c_str(), ec);
+        }
+        if (!exists) {
+            continue;
+        }
+        auto ret = this->exportDir(item.info.id, source, destination, 10);
+        if (!ret.has_value()) {
+            return ret;
+        }
+    }
+    return LINGLONG_OK;
+}
+
+utils::error::Result<void> OSTreeRepo::fixExportAllEntries() noexcept
+{
+    auto exportVersion = repoDir.absoluteFilePath("entries/.version").toStdString();
+    auto data = linglong::utils::readFile(exportVersion);
+    if (data && data == LINGLONG_EXPORT_VERSION) {
+        qDebug() << exportVersion.c_str() << data->c_str();
+        qDebug() << "skip export entry, already exported";
+    } else {
+        auto ret = exportAllEntries();
+        if (!ret.has_value()) {
+            qCritical() << "failed to export entries:" << ret.error();
+            return ret;
+        } else {
+            ret = linglong::utils::writeFile(exportVersion, LINGLONG_EXPORT_VERSION);
+            if (!ret.has_value()) {
+                qCritical() << "failed to write export version:" << ret.error();
+                return ret;
             }
         }
     }
+
     return LINGLONG_OK;
 }
 
@@ -1668,20 +1891,14 @@ utils::error::Result<void> OSTreeRepo::exportAllEntries() noexcept
 {
     LINGLONG_TRACE("export all entries");
     std::error_code ec;
-    // 创建新的share目录
+    // 创建一个新的entries目录，使用UUID作为名称
     auto id = QUuid::createUuid().toString(QUuid::Id128);
-    auto entriesDir = QDir(this->repoDir.absoluteFilePath("entries/share_new_" + id));
-    if (entriesDir.exists()) {
-        std::filesystem::remove_all(entriesDir.absolutePath().toStdString(), ec);
-        if (ec) {
-            return LINGLONG_ERR("clean temp share directory", ec);
-        }
-    }
-    std::filesystem::create_directory(entriesDir.absolutePath().toStdString(), ec);
+    std::filesystem::path entriesDir = this->repoDir.filePath("entries_new_" + id).toStdString();
+    std::filesystem::create_directory(entriesDir, ec);
     if (ec) {
         return LINGLONG_ERR("create temp share directory", ec);
     }
-    // 导出所有layer
+    // 导出所有layer到新entries目录
     auto items = this->cache->queryExistingLayerItem();
     for (const auto &item : items) {
         if (item.info.kind != "app") {
@@ -1692,27 +1909,29 @@ utils::error::Result<void> OSTreeRepo::exportAllEntries() noexcept
             return ret;
         }
     }
-    // 用新的share目录替换旧的
-    std::filesystem::path workdir = repoDir.absoluteFilePath("entries").toStdString();
-
-    if (!std::filesystem::exists(workdir / "share")) {
-        std::filesystem::rename(entriesDir.dirName().toStdString(), workdir / "share", ec);
+    // 用新的entries目录替换旧的
+    std::filesystem::path workdir = repoDir.absolutePath().toStdString();
+    auto existsOldEntries = std::filesystem::exists(workdir / "entries", ec);
+    if (ec) {
+        return LINGLONG_ERR("check entries directory", ec);
+    }
+    if (!existsOldEntries) {
+        std::filesystem::rename(entriesDir, workdir / "entries", ec);
         if (ec) {
-            return LINGLONG_ERR("create new share symlink", ec);
+            return LINGLONG_ERR("rename new entries directory", ec);
         }
     } else {
-        auto oldshare = "share_old_" + QUuid::createUuid().toString(QUuid::Id128).toStdString();
-        std::filesystem::rename(workdir / "share", workdir / oldshare, ec);
+        auto id = QUuid::createUuid().toString(QUuid::Id128).toStdString();
+        auto oldEntriesDir = workdir / ("entries_old_" + id);
+        std::filesystem::rename(workdir / "entries", oldEntriesDir, ec);
         if (ec) {
             return LINGLONG_ERR("rename old share directory", ec);
         }
-        std::filesystem::rename(workdir / entriesDir.dirName().toStdString(),
-                                workdir / "share",
-                                ec);
+        std::filesystem::rename(entriesDir, workdir / "entries", ec);
         if (ec) {
             return LINGLONG_ERR("create new share symlink", ec);
         }
-        std::filesystem::remove_all(workdir / oldshare, ec);
+        std::filesystem::remove_all(oldEntriesDir, ec);
         if (ec) {
             return LINGLONG_ERR("remove old share directory", ec);
         }
@@ -1808,7 +2027,7 @@ OSTreeRepo::getLayerItem(const package::Reference &ref,
                           .repo = std::nullopt,
                           .channel = ref.channel.toStdString(),
                           .version = ref.version.toString().toStdString(),
-                          .module = module,
+                          .module = std::move(module),
                           .uuid = subRef,
                           .deleted = std::nullopt };
     auto items = this->cache->queryLayerItem(query);
@@ -1830,7 +2049,7 @@ OSTreeRepo::getLayerItem(const package::Reference &ref,
     if (count == 0) {
         if (query.module != "binary") {
             return LINGLONG_ERR("couldn't find layer item " % ref.toString() % "/"
-                                % module.c_str());
+                                % query.module->c_str());
         }
 
         qDebug() << "fallback to runtime:" << query.to_string().c_str();
@@ -1880,6 +2099,58 @@ auto OSTreeRepo::getLayerDir(const package::Reference &ref,
 }
 
 // get all module list
+utils::error::Result<std::vector<std::string>> OSTreeRepo::getRemoteModuleList(
+  const package::Reference &ref,
+  const std::optional<std::vector<std::string>> &filter) const noexcept
+{
+    LINGLONG_TRACE("get remote module list");
+    auto fuzzy = package::FuzzyReference::create(ref.channel, ref.id, ref.version, ref.arch);
+    if (!fuzzy.has_value()) {
+        return LINGLONG_ERR("create fuzzy reference", fuzzy);
+    }
+    auto list = this->listRemote(*fuzzy);
+    if (!list.has_value()) {
+        return LINGLONG_ERR("list remote reference", fuzzy);
+    }
+    if (list->size() == 0) {
+        return {};
+    }
+    auto include = [](const std::vector<std::string> &arr, const std::string &item) {
+        return std::find(arr.begin(), arr.end(), item) != arr.end();
+    };
+    std::vector<std::string> modules;
+    for (const auto &ref : *list) {
+        auto remoteModule = ref.packageInfoV2Module;
+        // 如果不筛选，返回所有module
+        if (!filter.has_value()) {
+            modules.push_back(remoteModule);
+            continue;
+        }
+        // 如果筛选，只返回指定的module
+        if (include(filter.value(), remoteModule)) {
+            modules.push_back(remoteModule);
+            continue;
+        }
+        // TODO 在未来删除对旧版本runtime module的兼容
+
+        // 如果过滤列表包含runtime，可以使用binary替换
+        // 这一般是在升级时，本地runtime模块升级到binary模块
+        if (remoteModule == "binary" && include(filter.value(), "runtime")) {
+            modules.push_back(remoteModule);
+            continue;
+        }
+    }
+    // 如果想安装binary模块，但远程没有binary模块，就安装runtime模块
+    if (include(filter.value(), "binary") && !include(modules, "binary")) {
+        modules.emplace_back("runtime");
+    }
+    std::sort(modules.begin(), modules.end());
+    auto it = std::unique(modules.begin(), modules.end());
+    modules.erase(it, modules.end());
+    return modules;
+}
+
+// get all module list
 std::vector<std::string> OSTreeRepo::getModuleList(const package::Reference &ref) noexcept
 {
     repoCacheQuery query{
@@ -1892,13 +2163,15 @@ std::vector<std::string> OSTreeRepo::getModuleList(const package::Reference &ref
     // 按module字母从小到大排序，提前排序以保证后面的commits比较
     std::sort(layers.begin(),
               layers.end(),
-              [](api::types::v1::RepositoryCacheLayersItem lhs,
-                 api::types::v1::RepositoryCacheLayersItem rhs) {
+              [](const api::types::v1::RepositoryCacheLayersItem &lhs,
+                 const api::types::v1::RepositoryCacheLayersItem &rhs) {
                   return lhs.info.packageInfoV2Module < rhs.info.packageInfoV2Module;
               });
+
     std::vector<std::string> modules;
-    for (const auto &item : layers) {
-        modules.push_back(item.info.packageInfoV2Module);
+    modules.reserve(layers.size());
+    for (auto &item : layers) {
+        modules.emplace_back(std::move(item.info.packageInfoV2Module));
     }
     return modules;
 }
@@ -1909,8 +2182,7 @@ OSTreeRepo::getMergedModuleDir(const package::Reference &ref, bool fallbackLayer
 {
     LINGLONG_TRACE("get merge dir from ref " + ref.toString());
     qDebug() << "getMergedModuleDir" << ref.toString();
-    QDir mergedDir = this->repoDir.absoluteFilePath("merged");
-    auto layer = this->getLayerItem(ref, "binary", {});
+    auto layer = this->getLayerItem(ref, "binary");
     if (!layer) {
         qDebug().nospace() << "no such item:" << ref.toString()
                            << "/binary:" << layer.error().message();
@@ -1935,16 +2207,17 @@ utils::error::Result<package::LayerDir> OSTreeRepo::getMergedModuleDir(
         return LINGLONG_ERR("no merged item found");
     }
     // 如果找到layer对应的merge，就返回merge目录，否则回退到layer目录
-    for (auto item : items.value()) {
+    for (const auto &item : items.value()) {
         if (item.binaryCommit == layer.commit) {
             QDir dir = mergedDir.filePath(item.id.c_str());
             if (dir.exists()) {
                 return dir.path();
-            } else {
-                qWarning().nospace() << "not exists merged dir" << dir;
             }
+
+            qWarning().nospace() << "not exists merged dir" << dir;
         }
     }
+
     if (fallbackLayerDir) {
         return getLayerDir(layer);
     }
@@ -2168,6 +2441,300 @@ utils::error::Result<std::vector<api::types::v1::RepositoryCacheLayersItem>>
 OSTreeRepo::listLocalBy(const linglong::repo::repoCacheQuery &query) const noexcept
 {
     return this->cache->queryLayerItem(query);
+}
+
+QString getOriginRawExec(const QString &execArgs, [[maybe_unused]] const QString &id)
+{
+    // Note: These strings have appeared in the app-conf-generator.sh of linglong-builder.
+    // We need to remove them.
+
+    const QString oldExec = "--exec ";
+    const QString newExec = "-- ";
+
+    auto index = execArgs.indexOf(oldExec);
+    if (index != -1) {
+        return execArgs.mid(index + oldExec.length());
+    }
+
+    index = execArgs.indexOf(newExec);
+    if (index != -1) {
+        return execArgs.mid(index + newExec.length());
+    }
+
+    qCritical() << "'-- ' or '--exec ' is not exist in" << execArgs << ", return an empty string";
+    return "";
+}
+
+QString buildDesktopExec(QString origin, const QString &appID) noexcept
+{
+    auto newExec = QString{ "%1 run %2 " }.arg(LINGLONG_CLIENT_PATH, appID);
+
+    if (origin.isEmpty()) {
+        Q_ASSERT(false);
+        return newExec;
+    }
+
+    auto *begin = origin.begin();
+    while (true) {
+        if (begin == origin.end()) {
+            break;
+        }
+
+        begin = std::find(begin, origin.end(), '%');
+        if (begin == origin.end()) {
+            break;
+        }
+
+        auto *next = begin + 1;
+        if (next == origin.end()) {
+            break;
+        }
+
+        if (*next == '%') {
+            begin = next + 1;
+            continue;
+        }
+
+        QString code{ *next };
+        switch (next->toLatin1()) {
+        case 'f':
+            [[fallthrough]];
+        case 'F': {
+            origin.insert(next - origin.begin(), '%');
+            auto tmp = QString{ "--file %%1 -- -- %2" }.arg(std::move(code), std::move(origin));
+            newExec.append(tmp);
+            return newExec;
+        }
+        case 'u':
+            [[fallthrough]];
+        case 'U': {
+            origin.insert(next - origin.begin(), '%');
+            auto tmp = QString{ "--url %%1 -- -- %2" }.arg(std::move(code), std::move(origin));
+            newExec.append(tmp);
+            return newExec;
+        }
+        default: {
+            qDebug() << "no need to mapping" << *next;
+        } break;
+        }
+
+        break;
+    }
+
+    return newExec.append(QString{ "-- %1" }.arg(origin));
+}
+
+utils::error::Result<void> desktopFileRewrite(const QString &filePath, const QString &id)
+{
+    LINGLONG_TRACE("rewrite desktop file " + filePath);
+
+    auto file = utils::GKeyFileWrapper::New(filePath);
+    if (!file) {
+        return LINGLONG_ERR(file);
+    }
+
+    const auto groups = file->getGroups();
+    // set Exec
+    for (const auto &group : groups) {
+        auto hasExecRet = file->hasKey("Exec", group);
+        if (!hasExecRet) {
+            return LINGLONG_ERR(hasExecRet);
+        }
+        const auto &hasExec = *hasExecRet;
+        if (!hasExec) {
+            qWarning() << "No Exec section in" << group << ", set a default value";
+            auto defaultExec = QString("%1 run %2").arg(LINGLONG_CLIENT_PATH, id);
+            file->setValue("Exec", defaultExec, group);
+            continue;
+        }
+
+        auto originExec = file->getValue<QString>("Exec", group);
+        if (!originExec) {
+            return LINGLONG_ERR(originExec);
+        }
+        const auto &originExecStr = originExec->toStdString();
+
+        auto rawExec = *originExec;
+        if (originExec->contains(LINGLONG_CLIENT_NAME)) {
+            qDebug() << "The Exec section in" << filePath << "has been generated, rewrite again.";
+            rawExec = getOriginRawExec(*originExec, id);
+        }
+
+        file->setValue("Exec", buildDesktopExec(rawExec, id), group);
+    }
+
+    file->setValue("TryExec", LINGLONG_CLIENT_PATH, utils::GKeyFileWrapper::DesktopEntry);
+    file->setValue("X-linglong", id, utils::GKeyFileWrapper::DesktopEntry);
+
+    // save file
+    auto ret = file->saveToFile(filePath);
+    if (!ret) {
+        return LINGLONG_ERR(ret);
+    }
+
+    return LINGLONG_OK;
+}
+
+utils::error::Result<void> dbusServiceRewrite(const QString &filePath, const QString &id)
+{
+    LINGLONG_TRACE("rewrite dbus service file " + filePath);
+
+    auto file = utils::GKeyFileWrapper::New(filePath);
+    if (!file) {
+        return LINGLONG_ERR(file);
+    }
+
+    auto hasExecRet = file->hasKey("Exec", utils::GKeyFileWrapper::DBusService);
+    if (!hasExecRet) {
+        return LINGLONG_ERR(hasExecRet);
+    }
+    const auto &hasExec = *hasExecRet;
+    if (!hasExec) {
+        qWarning() << "DBus service" << filePath << "has no Exec Section.";
+        return LINGLONG_OK;
+    }
+
+    auto originExec = file->getValue<QString>("Exec", utils::GKeyFileWrapper::DBusService);
+    if (!originExec) {
+        return LINGLONG_ERR(originExec);
+    }
+
+    auto rawExec = *originExec;
+    if (originExec->contains(LINGLONG_CLIENT_NAME)) {
+        qDebug() << "The Exec section in" << filePath << "has been generated, rewrite again.";
+        rawExec = getOriginRawExec(*originExec, id);
+    }
+
+    auto newExec = QString("%1 run %2 -- %3").arg(LINGLONG_CLIENT_PATH, id, rawExec);
+    file->setValue("Exec", newExec, utils::GKeyFileWrapper::DBusService);
+
+    auto ret = file->saveToFile(filePath);
+    if (!ret) {
+        return LINGLONG_ERR(ret);
+    }
+
+    return LINGLONG_OK;
+}
+
+utils::error::Result<void> systemdServiceRewrite(const QString &filePath, const QString &id)
+{
+    LINGLONG_TRACE("rewrite systemd user service " + filePath);
+
+    // Related doc: https://www.freedesktop.org/software/systemd/man/latest/systemd.service.html
+    // NOTE: The key is allowed to be repeated in the service group
+    QStringList execKeys{ "ExecStart", "ExecStartPost", "ExecCondition",
+                          "ExecStop",  "ExecStopPost",  "ExecReload" };
+    auto file = utils::GKeyFileWrapper::New(filePath);
+    if (!file) {
+        return LINGLONG_ERR(file);
+    }
+
+    auto keys = file->getkeys(utils::GKeyFileWrapper::SystemdService);
+    if (!keys) {
+        return LINGLONG_ERR(keys);
+    }
+    for (const auto &key : *keys) {
+        if (!execKeys.contains(key)) {
+            continue;
+        }
+
+        auto originExec = file->getValue<QString>(key, utils::GKeyFileWrapper::SystemdService);
+        if (!originExec) {
+            return LINGLONG_ERR(originExec);
+        }
+
+        auto rawExec = *originExec;
+        if (originExec->contains(LINGLONG_CLIENT_NAME)) {
+            qDebug() << "The Exec section in" << filePath << "has been generated, rewrite again.";
+            rawExec = getOriginRawExec(*originExec, id);
+        }
+
+        auto newExec = QString("%1 run %2 -- %3").arg(LINGLONG_CLIENT_PATH, id, rawExec);
+        file->setValue(key, newExec, utils::GKeyFileWrapper::SystemdService);
+    }
+
+    auto ret = file->saveToFile(filePath);
+    if (!ret) {
+        return LINGLONG_ERR(ret);
+    }
+
+    return LINGLONG_OK;
+}
+
+utils::error::Result<void> contextMenuRewrite(const QString &filePath, const QString &id)
+{
+    LINGLONG_TRACE("rewrite context menu" + filePath);
+
+    auto file = utils::GKeyFileWrapper::New(filePath);
+    if (!file) {
+        return LINGLONG_ERR(file);
+    }
+
+    auto groups = file->getGroups();
+    // set Exec
+    for (const auto &group : groups) {
+        auto hasExecRet = file->hasKey("Exec", group);
+        if (!hasExecRet) {
+            return LINGLONG_ERR(hasExecRet);
+        }
+        const auto &hasExec = *hasExecRet;
+        // first group has no Exec, just skip it
+        if (!hasExec) {
+            continue;
+        }
+
+        auto originExec = file->getValue<QString>("Exec", group);
+        if (!originExec) {
+            return LINGLONG_ERR(originExec);
+        }
+        auto rawExec = *originExec;
+        if (originExec->contains(LINGLONG_CLIENT_NAME)) {
+            qDebug() << "The Exec section in" << filePath << "has been generated, rewrite again.";
+            rawExec = getOriginRawExec(*originExec, id);
+        }
+
+        file->setValue("Exec", buildDesktopExec(rawExec, id), group);
+    }
+
+    auto ret = file->saveToFile(filePath);
+    if (!ret) {
+        return LINGLONG_ERR(ret);
+    }
+
+    return LINGLONG_OK;
+}
+
+utils::error::Result<void> OSTreeRepo::IniLikeFileRewrite(const QFileInfo &info,
+                                                          const QString &id) noexcept
+{
+    LINGLONG_TRACE("ini-like file rewrite");
+
+    if (info.path().contains("share/applications") && info.suffix() == "desktop") {
+        auto ret = desktopFileRewrite(info.absoluteFilePath(), id);
+        if (!ret) {
+            return LINGLONG_ERR(ret);
+        }
+        // In KDE environment, every desktop should own the executable permission
+        // We just set the file permission to 0755 here.
+        if (!QFile::setPermissions(info.absoluteFilePath(),
+                                   QFileDevice::ReadOwner | QFileDevice::WriteOwner
+                                     | QFileDevice::ExeOwner | QFileDevice::ReadGroup
+                                     | QFileDevice::ExeGroup | QFileDevice::ReadOther
+                                     | QFileDevice::ExeOther)) {
+            qCritical() << "Failed to chmod" << info.absoluteFilePath();
+            Q_ASSERT(false);
+        }
+
+    } else if (info.path().contains("share/dbus-1") && info.suffix() == "service") {
+        return dbusServiceRewrite(info.absoluteFilePath(), id);
+    } else if (info.path().contains("share/systemd/user") && info.suffix() == "service") {
+        return systemdServiceRewrite(info.absoluteFilePath(), id);
+    } else if (info.path().contains("share/applications/context-menus")
+               && info.suffix() == "conf") {
+        return contextMenuRewrite(info.absoluteFilePath(), id);
+    }
+
+    return LINGLONG_OK;
 }
 
 OSTreeRepo::~OSTreeRepo() = default;

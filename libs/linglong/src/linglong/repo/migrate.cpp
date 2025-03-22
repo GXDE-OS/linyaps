@@ -5,6 +5,7 @@
 #include "migrate.h"
 
 #include "linglong/package/version.h"
+#include "linglong/repo/config.h"
 #include "linglong/utils/configure.h"
 
 #include <gio/gio.h>
@@ -180,7 +181,7 @@ int migrateRef(OstreeRepo *repo, const MigrateRefData &data)
 
 int dispatchMigrations(const Version &from,
                        const std::filesystem::path &root,
-                       const linglong::api::types::v1::RepoConfig &cfg)
+                       const linglong::api::types::v1::RepoConfigV2 &cfg)
 {
     std::error_code ec;
     std::filesystem::path ostreeRepo = root / "repo";
@@ -206,10 +207,8 @@ int dispatchMigrations(const Version &from,
     int ret{ std::numeric_limits<int>::max() };
     auto version_1_7_0 = parseVersion("1.7.0");
     if (from < *version_1_7_0) {
-        ret = migrateRef(repo, MigrateRefData{ .root = root, .repoName = cfg.defaultRepo });
-    }
-    if (ret == -1) {
-        return -1;
+        const auto defaultRepo = linglong::repo::getDefaultRepo(cfg);
+        ret = migrateRef(repo, MigrateRefData{ .root = root, .repoName = defaultRepo.name });
     }
 
     return ret;
@@ -217,7 +216,7 @@ int dispatchMigrations(const Version &from,
 
 namespace linglong::repo {
 MigrateResult tryMigrate(const std::filesystem::path &root,
-                         const linglong::api::types::v1::RepoConfig &cfg) noexcept
+                         const linglong::api::types::v1::RepoConfigV2 &cfg) noexcept
 {
     std::error_code ec;
     if (!std::filesystem::exists(root, ec)) {

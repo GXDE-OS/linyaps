@@ -27,8 +27,11 @@ pfl_add_library(
   src/linglong/utils/error/error.h
   src/linglong/utils/finally/finally.cpp
   src/linglong/utils/finally/finally.h
+  src/linglong/utils/gettext.h
   src/linglong/utils/global/initialize.cpp
   src/linglong/utils/global/initialize.h
+  src/linglong/utils/overlayfs.cpp
+  src/linglong/utils/overlayfs.h
   src/linglong/utils/packageinfo_handler.cpp
   src/linglong/utils/packageinfo_handler.h
   src/linglong/utils/serialize/json.cpp
@@ -38,9 +41,12 @@ pfl_add_library(
   src/linglong/utils/std_helper/qdebug_helper.h
   src/linglong/utils/transaction.cpp
   src/linglong/utils/transaction.h
+  src/linglong/utils/file.cpp
+  src/linglong/utils/file.h
   src/linglong/utils/xdg/desktop_entry.cpp
   src/linglong/utils/xdg/desktop_entry.h
-  src/linglong/utils/gettext.h
+  src/linglong/utils/xdg/directory.h
+  src/linglong/utils/gkeyfile_wrapper.h
   COMPILE_FEATURES
   PUBLIC
   cxx_std_17

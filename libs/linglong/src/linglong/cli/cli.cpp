@@ -6,6 +6,7 @@
 
 #include "linglong/cli/cli.h"
 
+#include "linglong/api/dbus/v1/dbus_peer.h"
 #include "linglong/api/types/v1/InteractionReply.hpp"
 #include "linglong/api/types/v1/InteractionRequest.hpp"
 #include "linglong/api/types/v1/PackageManager1InstallParameters.hpp"
@@ -20,11 +21,16 @@
 #include "linglong/api/types/v1/UpgradeListResult.hpp"
 #include "linglong/cli/printer.h"
 #include "linglong/package/layer_file.h"
+#include "linglong/repo/config.h"
 #include "linglong/runtime/container_builder.h"
 #include "linglong/utils/configure.h"
 #include "linglong/utils/error/error.h"
+#include "linglong/utils/finally/finally.h"
+#include "linglong/utils/gettext.h"
 #include "linglong/utils/serialize/json.h"
+#include "linglong/utils/xdg/directory.h"
 #include "ocppi/runtime/ExecOption.hpp"
+#include "ocppi/runtime/RunOption.hpp"
 #include "ocppi/runtime/Signal.hpp"
 #include "ocppi/types/ContainerListItem.hpp"
 
@@ -34,13 +40,195 @@
 #include <QEventLoop>
 #include <QFileInfo>
 
+#include <charconv>
+#include <cstdlib>
 #include <filesystem>
 #include <iostream>
 #include <system_error>
+#include <thread>
 
 #include <fcntl.h>
+#include <sys/mman.h>
+#include <unistd.h>
 
 using namespace linglong::utils::error;
+
+static const std::string permissionNotifyMsg =
+  _("Permission deny, please check whether you are running as root.");
+
+namespace {
+
+linglong::utils::error::Result<bool> isChildProcess(pid_t parent, pid_t pid) noexcept
+{
+    LINGLONG_TRACE(QString{ "check if %1 is child of %2" }.arg(pid).arg(parent));
+
+    auto getppid = [](pid_t pid) -> Result<pid_t> {
+        LINGLONG_TRACE(QString{ "get ppid of %1" }.arg(pid));
+        std::error_code ec;
+        auto stat = std::filesystem::path("/proc/" + std::to_string(pid) + "/stat");
+        auto fd = ::open(stat.c_str(), O_RDONLY);
+        if (fd == -1) {
+            return LINGLONG_ERR(
+              QString{ "failed to open %1: %2" }.arg(stat.c_str(), ::strerror(errno)));
+        }
+        auto closeFd = linglong::utils::finally::finally([fd] {
+            ::close(fd);
+        });
+
+        // FIXME: Parsing /proc/pid/stat isn't an good idea, the consistency of file contents
+        // which in /proc is not guaranteed and the format may change. so we read all the content at
+        // first and then parse it.
+        // use read instead of std::ifstream to get more detailed error information the size
+        // of /proc/pid/stat is zero and we can't get the content size by stat,
+        // so we use 1024 as the buffer size.
+        std::array<char, 1024> buf{};
+        std::string content;
+        while (true) {
+            auto readBytes = ::read(fd, buf.data(), buf.size());
+            if (readBytes == -1) {
+                return LINGLONG_ERR(
+                  QString{ "failed to read from %1: %2" }.arg(stat.c_str(), ::strerror(errno)));
+            }
+
+            if (readBytes == 0) {
+                break;
+            }
+
+            content.append(buf.data(), readBytes);
+        }
+
+        auto ppidOffset = 3;
+        std::string::size_type left = 0;
+        std::string::size_type right = 0;
+        for (std::string::size_type i = 0; i < content.size(); i++) {
+            if (ppidOffset == 0) {
+                left = i;
+                right = i;
+
+                while (content[right] != ' ') {
+                    right += 1;
+                }
+
+                break;
+            }
+
+            if (content[i] == ' ') {
+                ppidOffset -= 1;
+            }
+        }
+
+        pid_t ppid{ -1 };
+        auto [_, err] = std::from_chars(content.c_str() + left, content.c_str() + right, ppid);
+        if (err != std::errc()) {
+            return LINGLONG_ERR(QString{ "failed to parse %1: %2" }.arg(
+              std::string_view(content.c_str() + left, right - left).data(),
+              ::strerror(static_cast<int>(err))));
+        }
+
+        return ppid;
+    };
+
+    while (pid != parent) {
+        auto ppid = getppid(pid);
+        if (!ppid) {
+            return LINGLONG_ERR(ppid.error());
+        }
+
+        pid = *ppid;
+        if (pid < parent) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+linglong::utils::error::Result<void> ensureDirectory(const std::filesystem::path &dir)
+{
+    LINGLONG_TRACE("ensure runtime directory");
+    std::error_code ec;
+    if (!std::filesystem::create_directory(dir, ec) && ec) {
+        return LINGLONG_ERR("failed to create runtime directory", ec);
+    }
+
+    return LINGLONG_OK;
+}
+
+static std::vector<std::string> getAutoModuleList() noexcept
+{
+    auto getModuleFromLanguageEnv = [](const std::string &lang) -> std::vector<std::string> {
+        if (lang.length() < 2) {
+            return {};
+        }
+
+        if (!std::all_of(lang.begin(), lang.begin() + 2, [](char c) {
+                return 'a' <= c && c <= 'z';
+            })) {
+            return {};
+        }
+
+        std::vector<std::string> modules;
+        modules.push_back("lang_" + lang.substr(0, 2));
+
+        if (lang.length() == 2) {
+            return modules;
+        }
+
+        if (lang[2] == '.') {
+            return modules;
+        }
+
+        if (lang[2] == '@') {
+            return modules;
+        }
+
+        if (lang[2] != '_') {
+            return {};
+        }
+
+        if (lang.length() < 5) {
+            return {};
+        }
+
+        modules.push_back("lang_" + lang.substr(0, 5));
+
+        if (lang.length() == 5) {
+            return modules;
+        }
+
+        if (lang[5] == '.') {
+            return modules;
+        }
+
+        if (lang[5] == '@') {
+            return modules;
+        }
+
+        return {};
+    };
+
+    auto envs = {
+        "LANG",           "LC_ADDRESS",  "LC_ALL",       "LC_IDENTIFICATION",
+        "LC_MEASUREMENT", "LC_MESSAGES", "LC_MONETARY",  "LC_NAME",
+        "LC_NUMERIC",     "LC_PAPER",    "LC_TELEPHONE", "LC_TIME",
+    };
+
+    std::vector<std::string> result = { "binary" };
+
+    for (const auto &env : envs) {
+        auto lang = getenv(env);
+        if (lang == nullptr) {
+            continue;
+        }
+        auto modules = getModuleFromLanguageEnv(lang);
+        result.insert(result.end(), modules.begin(), modules.end());
+    }
+
+    std::sort(result.begin(), result.end());
+    return { result.begin(), std::unique(result.begin(), result.end()) };
+}
+
+} // namespace
 
 namespace linglong::cli {
 
@@ -90,7 +278,7 @@ void Cli::onTaskPropertiesChanged(QString interface,                            
                 continue;
             }
 
-            lastPercentage = val;
+            lastPercentage = val > 100 ? 100 : val;
             continue;
         }
 
@@ -170,8 +358,8 @@ void Cli::interaction(QDBusObjectPath object_path, int messageID, QVariantMap ad
     dbusReply.waitForFinished();
     if (dbusReply.isError()) {
         if (dbusReply.error().type() == QDBusError::AccessDenied) {
-            this->notifier->notify(api::types::v1::InteractionRequest{
-              .summary = "Permission deny, please check whether you are running as root." });
+            this->notifier->notify(
+              api::types::v1::InteractionRequest{ .summary = permissionNotifyMsg });
             return;
         }
 
@@ -267,7 +455,7 @@ Cli::Cli(Printer &printer,
     }
 }
 
-int Cli::run()
+int Cli::run([[maybe_unused]] CLI::App *subcommand)
 {
     LINGLONG_TRACE("command run");
     // NOTE: ll-box is not support running as root for now.
@@ -277,11 +465,17 @@ int Cli::run()
     }
 
     auto userContainerDir = std::filesystem::path{ "/run/linglong" } / std::to_string(::getuid());
+    if (auto ret = ensureDirectory(userContainerDir); !ret) {
+        this->printer.printErr(ret.error());
+        return -1;
+    }
+
     auto mode = S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH;
     auto pidFile = userContainerDir / std::to_string(::getpid());
+    // placeholder file
     auto fd = ::open(pidFile.c_str(), O_WRONLY | O_CREAT | O_EXCL, mode);
     if (fd == -1) {
-        qCritical() << QString{ "create file " } + pidFile.c_str() + " error:" + ::strerror(errno);
+        qCritical() << QString{ "create file " } % pidFile.c_str() % " error:" % ::strerror(errno);
         QCoreApplication::exit(-1);
         return -1;
     }
@@ -295,10 +489,7 @@ int Cli::run()
         }
     });
 
-    const auto userInputAPP = QString::fromStdString(options.appid);
-    Q_ASSERT(!userInputAPP.isEmpty());
-
-    auto fuzzyRef = package::FuzzyReference::parse(userInputAPP);
+    auto fuzzyRef = package::FuzzyReference::parse(QString::fromStdString(options.appid));
     if (!fuzzyRef) {
         this->printer.printErr(fuzzyRef.error());
         return -1;
@@ -319,17 +510,30 @@ int Cli::run()
         return -1;
     }
 
-    auto info = appLayerDir->info();
-    if (!info) {
-        this->printer.printErr(info.error());
+    // Note: we should use the info.json which from states.json instead of layer dir
+    const auto &appLayerItem = this->repository.getLayerItem(*curAppRef);
+    if (!appLayerItem) {
+        this->printer.printErr(appLayerItem.error());
         return -1;
+    }
+    const auto &info = appLayerItem->info;
+
+    const auto &appDataDir = utils::xdg::appDataDir(info.id);
+    if (!appDataDir) {
+        this->printer.printErr(appDataDir.error());
+        return -1;
+    }
+
+    auto ret = RequestDirectories(info);
+    if (!ret) {
+        qWarning() << ret.error().message();
     }
 
     std::optional<std::string> runtimeLayerRef;
     std::optional<package::LayerDir> runtimeLayerDir;
-    if (info->runtime) {
+    if (info.runtime) {
         auto runtimeFuzzyRef =
-          package::FuzzyReference::parse(QString::fromStdString(*info->runtime));
+          package::FuzzyReference::parse(QString::fromStdString(info.runtime.value()));
         if (!runtimeFuzzyRef) {
             this->printer.printErr(runtimeFuzzyRef.error());
             return -1;
@@ -344,18 +548,18 @@ int Cli::run()
             this->printer.printErr(runtimeRefRet.error());
             return -1;
         }
-        auto &runtimeRef = *runtimeRefRet;
+        const auto &runtimeRef = *runtimeRefRet;
 
-        if (!info->uuid.has_value()) {
+        if (!info.uuid.has_value()) {
             auto runtimeLayerDirRet = this->repository.getMergedModuleDir(runtimeRef);
             if (!runtimeLayerDirRet) {
                 this->printer.printErr(runtimeLayerDirRet.error());
                 return -1;
             }
-            runtimeLayerDir = *runtimeLayerDirRet;
+            runtimeLayerDir = std::move(runtimeLayerDirRet).value();
         } else {
             auto runtimeLayerDirRet =
-              this->repository.getLayerDir(*runtimeRefRet, std::string{ "binary" }, info->uuid);
+              this->repository.getLayerDir(*runtimeRefRet, "binary", info.uuid);
             if (!runtimeLayerDirRet) {
                 this->printer.printErr(runtimeLayerDirRet.error());
                 return -1;
@@ -365,7 +569,7 @@ int Cli::run()
         }
     }
 
-    auto baseFuzzyRef = package::FuzzyReference::parse(QString::fromStdString(info->base));
+    auto baseFuzzyRef = package::FuzzyReference::parse(QString::fromStdString(info.base));
     if (!baseFuzzyRef) {
         this->printer.printErr(baseFuzzyRef.error());
         return -1;
@@ -380,42 +584,46 @@ int Cli::run()
         this->printer.printErr(LINGLONG_ERRV(baseRef));
         return -1;
     }
+
     utils::error::Result<package::LayerDir> baseLayerDir;
-    if (!info->uuid.has_value()) {
+    if (!info.uuid.has_value()) {
         qDebug() << "getMergedModuleDir base";
         baseLayerDir = this->repository.getMergedModuleDir(*baseRef);
     } else {
-        qDebug() << "getLayerDir base" << info->uuid.value().c_str();
-        baseLayerDir = this->repository.getLayerDir(*baseRef, std::string{ "binary" }, info->uuid);
+        qDebug() << "getLayerDir base" << info.uuid.value().c_str();
+        baseLayerDir = this->repository.getLayerDir(*baseRef, "binary", info.uuid);
     }
+
     if (!baseLayerDir) {
         this->printer.printErr(LINGLONG_ERRV(baseLayerDir));
         return -1;
     }
 
+    auto appCache = this->ensureCache(*curAppRef, *appLayerItem);
+    if (!appCache) {
+        this->printer.printErr(LINGLONG_ERRV(appCache));
+        return -1;
+    }
+
     auto commands = options.commands;
-    if (commands.empty()) {
-        commands = info->command.value_or(std::vector<std::string>{});
+    if (options.commands.empty()) {
+        commands = info.command.value_or(std::vector<std::string>{ "bash" });
     }
+    commands = filePathMapping(commands);
 
-    if (commands.empty()) {
-        qWarning() << "invalid command found in package" << QString::fromStdString(info->id);
-        commands = { "bash" };
+    auto newContainerID = runtime::genContainerID(*curAppRef);
+    auto bundle = runtime::getBundleDir(newContainerID);
+    if (!bundle) {
+        this->printer.printErr(LINGLONG_ERRV(bundle));
+        return -1;
     }
-    auto execArgs = filePathMapping(commands);
-
-    auto newContainerID = [id = curAppRef->toString() + "-"]() mutable {
-        auto now = std::chrono::steady_clock::now().time_since_epoch().count();
-        id.append(QByteArray::fromStdString(std::to_string(now)));
-        return QCryptographicHash::hash(id.toUtf8(), QCryptographicHash::Sha256).toHex();
-    }();
 
     // this lambda will dump reference of containerID, app, base and runtime to
     // /run/linglong/getuid()/getpid() to store these needed infomation
     auto dumpContainerInfo = [app = curAppRef->toString().toStdString(),
                               base = baseRef->toString().toStdString(),
-                              containerID = newContainerID.toStdString(),
-                              runtime = runtimeLayerRef,
+                              &newContainerID,
+                              &runtimeLayerRef,
                               this]() -> bool {
         LINGLONG_TRACE("dump info")
         std::error_code ec;
@@ -425,27 +633,25 @@ int Cli::run()
             if (ec) {
                 qCritical() << "couldn't get status of" << pidFile.c_str() << ":"
                             << ec.message().c_str();
-                return ec.value();
+                return false;
             }
 
             auto msg = "state file " + pidFile.string() + "doesn't exist, abort.";
             qFatal("%s", msg.c_str());
         }
 
-        auto stateInfo = linglong::api::types::v1::ContainerProcessStateInfo{
-            .app = app,
-            .base = base,
-            .containerID = containerID,
-            .runtime = runtime,
-        };
-
         std::ofstream stream{ pidFile };
         if (!stream.is_open()) {
-            auto msg = QString{ "failed to open " } + pidFile.c_str();
+            auto msg = QString{ "failed to open %1" }.arg(pidFile.c_str());
             this->printer.printErr(LINGLONG_ERRV(msg));
             return false;
         }
-        stream << nlohmann::json(stateInfo).dump();
+        stream << nlohmann::json(linglong::api::types::v1::ContainerProcessStateInfo{
+          .app = app,
+          .base = base,
+          .containerID = newContainerID,
+          .runtime = runtimeLayerRef,
+        });
         stream.close();
 
         return true;
@@ -462,33 +668,38 @@ int Cli::run()
             return -1;
         }
 
-        QStringList bashArgs;
+        QStringList execArgs;
+        std::transform(commands.begin(),
+                       commands.end(),
+                       std::back_inserter(execArgs),
+                       [](const std::string &arg) {
+                           return QString::fromStdString(arg);
+                       });
+
         // 为避免原始args包含空格，每个arg都使用单引号包裹，并对arg内部的单引号进行转义替换
-        for (const auto &arg : execArgs) {
-            bashArgs.push_back(
-              QString("'%1'").arg(QString::fromStdString(arg).replace("'", "'\\''")));
-        }
+        std::for_each(execArgs.begin(), execArgs.end(), [](QString &arg) {
+            arg.replace("'", "'\\''");
+            arg.prepend('\'');
+            arg.push_back('\'');
+        });
 
-        if (!bashArgs.isEmpty()) {
-            // exec命令使用原始args中的进程替换bash进程
-            bashArgs.prepend("exec");
-        }
+        // exec命令使用原始args中的进程替换bash进程
+        execArgs.prepend("exec");
+
         // 在原始args前面添加bash --login -c，这样可以使用/etc/profile配置的环境变量
-        execArgs = std::vector<std::string>{ "/bin/bash",
-                                             "--login",
-                                             "-c",
-                                             bashArgs.join(" ").toStdString(),
-                                             "; wait" };
+        commands = std::vector<std::string>{
+            "/bin/bash", "--login", "-e", "-c", execArgs.join(' ').toStdString(), "; wait"
+        };
 
-        auto opt = ocppi::runtime::ExecOption{};
-        opt.uid = ::getuid();
-        opt.gid = ::getgid();
+        auto opt = ocppi::runtime::ExecOption{
+            .uid = ::getuid(),
+            .gid = ::getgid(),
+        };
 
         auto result = this->ociCLI.exec(container.id,
-                                        execArgs[0],
-                                        { execArgs.cbegin() + 1, execArgs.cend() },
+                                        commands[0],
+                                        { commands.cbegin() + 1, commands.cend() },
                                         opt);
-
         if (!result) {
             auto err = LINGLONG_ERRV(result);
             this->printer.printErr(err);
@@ -524,8 +735,8 @@ int Cli::run()
           });
       };
 
-    if (info->permissions) {
-        auto &perm = info->permissions;
+    if (info.permissions) {
+        const auto &perm = info.permissions;
         if (perm->binds) {
             const auto &binds = perm->binds;
             std::for_each(binds->cbegin(), binds->cend(), bindMount);
@@ -539,29 +750,45 @@ int Cli::run()
         }
     }
 
+    applicationMounts.push_back(ocppi::runtime::config::types::Mount{
+      .destination = "/run/linglong/cache",
+      .options = nlohmann::json::array({ "rbind", "ro" }),
+      .source = *appCache,
+      .type = "bind",
+    });
+
+#ifdef LINGLONG_FONT_CACHE_GENERATOR
+    applicationMounts.push_back(ocppi::runtime::config::types::Mount{
+      .destination = "/var/cache/fontconfig",
+      .options = nlohmann::json::array({ "rbind", "ro" }),
+      .source = *appCache + "/fontconfig",
+      .type = "bind",
+    });
+#endif
     auto container = this->containerBuilder.create({
-      .appID = curAppRef->id,
-      .containerID = newContainerID,
-      .runtimeDir = runtimeLayerDir,
-      .baseDir = *baseLayerDir,
-      .appDir = *appLayerDir,
+      .appID = std::move(curAppRef->id),
+      .containerID = QString::fromStdString(newContainerID),
+      .runtimeDir = std::move(runtimeLayerDir),
+      .baseDir = std::move(baseLayerDir).value(),
+      .appDir = std::move(appLayerDir).value(),
+      .bundle = std::move(bundle).value(),
       .patches = {},
       .mounts = std::move(applicationMounts),
       .masks = {},
     });
+
     if (!container) {
         this->printer.printErr(container.error());
         return -1;
     }
 
-    ocppi::runtime::config::types::Process process{};
-    process.args = execArgs;
-
     if (!dumpContainerInfo()) {
         return -1;
     }
 
-    auto result = (*container)->run(process);
+    ocppi::runtime::RunOption opt{};
+    auto result =
+      (*container)->run(ocppi::runtime::config::types::Process{ .args = std::move(commands) }, opt);
     if (!result) {
         this->printer.printErr(result.error());
         return -1;
@@ -570,7 +797,7 @@ int Cli::run()
     return 0;
 }
 
-int Cli::exec()
+int Cli::exec([[maybe_unused]] CLI::App *subcommand)
 {
     LINGLONG_TRACE("ll-cli exec");
     auto containers = getCurrentContainers();
@@ -582,7 +809,13 @@ int Cli::exec()
 
     std::string containerID;
     for (const auto &container : *containers) {
-        if (container.package == options.instance) {
+        std::string packageName = container.package;
+        std::string::size_type colonPos = packageName.find(':');
+        std::string::size_type slashPos = packageName.find('/');
+        if (colonPos != std::string::npos && slashPos != std::string::npos) {
+            packageName = packageName.substr(colonPos + 1, slashPos - colonPos - 1);
+        }
+        if (packageName == options.instance) {
             containerID = container.id;
             break;
         }
@@ -595,29 +828,16 @@ int Cli::exec()
 
     qInfo() << "select container id" << QString::fromStdString(containerID);
     auto commands = options.commands;
-    if (commands.size() != 0) {
-        QStringList bashArgs;
-        // 为避免原始args包含空格，每个arg都使用单引号包裹，并对arg内部的单引号进行转义替换
-        for (const auto &arg : commands) {
-            bashArgs.push_back(
-              QString("'%1'").arg(QString::fromStdString(arg).replace("'", "'\\''")));
-        }
-        if (!bashArgs.isEmpty()) {
-            // exec命令使用原始args中的进程替换bash进程
-            bashArgs.prepend("exec");
-        }
-        // 在原始args前面添加bash --login -c，这样可以使用/etc/profile配置的环境变量
-        commands = std::vector<std::string>{ "/bin/bash",
-                                             "--login",
-                                             "-c",
-                                             bashArgs.join(" ").toStdString(),
-                                             "; wait" };
-    } else {
-        commands = { "bash", "--login" };
+    if (commands.size() == 0) {
+        commands.emplace_back("bash");
+        commands.emplace_back("--login");
     }
-    auto opt = ocppi::runtime::ExecOption{};
-    opt.uid = ::getuid();
-    opt.gid = ::getgid();
+
+    auto opt = ocppi::runtime::ExecOption{
+        .uid = ::getuid(),
+        .gid = ::getgid(),
+    };
+
     auto result =
       this->ociCLI.exec(containerID, commands[0], { commands.begin() + 1, commands.end() }, opt);
     if (!result) {
@@ -641,7 +861,19 @@ Cli::getCurrentContainers() const noexcept
 
     std::vector<api::types::v1::CliContainer> myContainers;
     auto infoDir = std::filesystem::path{ "/run/linglong" } / std::to_string(::getuid());
-    for (const auto &pidFile : std::filesystem::directory_iterator{ infoDir }) {
+
+    std::error_code ec;
+    auto it = std::filesystem::directory_iterator{ infoDir, ec };
+    if (ec) {
+        if (ec == std::errc::no_such_file_or_directory) {
+            return myContainers;
+        }
+
+        return LINGLONG_ERR(
+          QString{ "failed to list %1: %2" }.arg(infoDir.c_str(), ec.message().c_str()));
+    }
+
+    for (const auto &pidFile : it) {
         const auto &file = pidFile.path();
         const auto &process = "/proc" / file.filename();
 
@@ -653,8 +885,7 @@ Cli::getCurrentContainers() const noexcept
         }
 
         auto info = linglong::utils::serialize::LoadJSONFile<
-          linglong::api::types::v1::ContainerProcessStateInfo>(
-          QString::fromStdString(file.string()));
+          linglong::api::types::v1::ContainerProcessStateInfo>(file);
         if (!info) {
             qDebug() << "load info from" << file.c_str() << "error:" << info.error().message();
             continue;
@@ -681,7 +912,7 @@ Cli::getCurrentContainers() const noexcept
     return myContainers;
 }
 
-int Cli::ps()
+int Cli::ps([[maybe_unused]] CLI::App *subcommand)
 {
     LINGLONG_TRACE("command ps");
 
@@ -703,7 +934,7 @@ int Cli::ps()
     return 0;
 }
 
-int Cli::kill()
+int Cli::kill([[maybe_unused]] CLI::App *subcommand)
 {
     LINGLONG_TRACE("command kill");
 
@@ -730,12 +961,10 @@ int Cli::kill()
     }
 
     auto ret = 0;
-
     for (const auto &containerID : containerIDList) {
         qInfo() << "select container id" << QString::fromStdString(containerID);
-
         auto result = this->ociCLI.kill(ocppi::runtime::ContainerID(containerID),
-                                        ocppi::runtime::Signal("SIGTERM"));
+                                        ocppi::runtime::Signal(options.signal));
         if (!result) {
             auto err = LINGLONG_ERRV(result);
             this->printer.printErr(err);
@@ -759,7 +988,26 @@ void Cli::cancelCurrentTask()
 int Cli::installFromFile(const QFileInfo &fileInfo, const api::types::v1::CommonOptions &options)
 {
     auto filePath = fileInfo.absoluteFilePath();
-    LINGLONG_TRACE(QString{ "install from file %1" }.arg(filePath))
+    LINGLONG_TRACE(QString{ "install from file %1" }.arg(filePath));
+
+    QDBusReply<QString> authReply = this->authorization();
+    if (!authReply.isValid() && authReply.error().type() == QDBusError::AccessDenied) {
+        auto args = QCoreApplication::instance()->arguments();
+        // pkexec在0.120版本之前没有keep-cwd选项，会将目录切换到/root
+        // 所以将layer或uab文件的相对路径转为绝对路径，再传给pkexec
+        auto path = fileInfo.absoluteFilePath();
+        for (auto i = 0; i < args.length(); i++) {
+            if (args[i] == QString::fromStdString(this->options.appid)) {
+                args[i] = path.toLocal8Bit().constData();
+            }
+        }
+
+        auto ret = this->runningAsRoot(args);
+        if (!ret) {
+            this->printer.printErr(ret.error());
+        }
+        return -1;
+    }
 
     qInfo() << "install from file" << filePath;
     QFile file{ filePath };
@@ -789,8 +1037,8 @@ int Cli::installFromFile(const QFileInfo &fileInfo, const api::types::v1::Common
     pendingReply.waitForFinished();
     if (pendingReply.isError()) {
         if (pendingReply.error().type() == QDBusError::AccessDenied) {
-            this->notifier->notify(api::types::v1::InteractionRequest{
-              .summary = "Permission deny, please check whether you are running as root." });
+            this->notifier->notify(
+              api::types::v1::InteractionRequest{ .summary = permissionNotifyMsg });
             return -1;
         }
         auto err = LINGLONG_ERRV(pendingReply.error().message());
@@ -839,35 +1087,13 @@ int Cli::installFromFile(const QFileInfo &fileInfo, const api::types::v1::Common
         return -1;
     }
 
+    updateAM();
     return this->lastState == linglong::api::types::v1::State::Succeed ? 0 : -1;
 }
 
-int Cli::install()
+int Cli::install([[maybe_unused]] CLI::App *subcommand)
 {
     LINGLONG_TRACE("command install");
-
-    QDBusReply<QString> authReply = this->authorization();
-    if (!authReply.isValid() && authReply.error().type() == QDBusError::AccessDenied) {
-        auto args = QCoreApplication::instance()->arguments();
-        // pkexec在0.120版本之前没有keep-cwd选项，会将目录切换到/root
-        // 所以将layer或uab文件的相对路径转为绝对路径，再传给pkexec
-        if (std::filesystem::exists(options.appid)) {
-            auto path = std::filesystem::absolute(options.appid);
-            for (auto i = 0; i < args.length(); i++) {
-                if (args[i] == options.appid.c_str()) {
-                    args[i] = path.c_str();
-                }
-            }
-        }
-        auto ret = this->runningAsRoot(args);
-        if (!ret) {
-            this->printer.printErr(ret.error());
-        }
-        return -1;
-    }
-
-    auto app = QString::fromStdString(options.appid);
-    QFileInfo info(app);
 
     auto params =
       api::types::v1::PackageManager1InstallParameters{ .options = { .force = false,
@@ -875,9 +1101,21 @@ int Cli::install()
     params.options.force = options.forceOpt;
     params.options.skipInteraction = options.confirmOpt;
 
+    auto app = QString::fromStdString(options.appid);
+    QFileInfo info(app);
+
     // 如果检测是文件，则直接安装
     if (info.exists() && info.isFile()) {
         return installFromFile(QFileInfo{ info.absoluteFilePath() }, params.options);
+    }
+
+    QDBusReply<QString> authReply = this->authorization();
+    if (!authReply.isValid() && authReply.error().type() == QDBusError::AccessDenied) {
+        auto ret = this->runningAsRoot();
+        if (!ret) {
+            this->printer.printErr(ret.error());
+        }
+        return -1;
     }
 
     auto conn = this->pkgMan.connection();
@@ -907,7 +1145,14 @@ int Cli::install()
     }
 
     if (!options.module.empty()) {
-        params.package.packageManager1PackageModule = options.module;
+        params.package.modules = { options.module };
+    } else {
+        params.package.modules = getAutoModuleList();
+    }
+
+    qDebug() << "Install modules";
+    for (const auto &module : *params.package.modules) {
+        qDebug() << module.c_str();
     }
 
     auto pendingReply = this->pkgMan.Install(utils::serialize::toQVariantMap(params));
@@ -915,8 +1160,8 @@ int Cli::install()
 
     if (pendingReply.isError()) {
         if (pendingReply.error().type() == QDBusError::AccessDenied) {
-            this->notifier->notify(api::types::v1::InteractionRequest{
-              .summary = "Permission deny, please check whether you are running as root." });
+            this->notifier->notify(
+              api::types::v1::InteractionRequest{ .summary = permissionNotifyMsg });
             return -1;
         }
 
@@ -960,10 +1205,11 @@ int Cli::install()
     }
     loop.exec();
 
+    updateAM();
     return this->lastState == linglong::api::types::v1::State::Succeed ? 0 : -1;
 }
 
-int Cli::upgrade()
+int Cli::upgrade([[maybe_unused]] CLI::App *subcommand)
 {
     LINGLONG_TRACE("command upgrade");
 
@@ -1004,6 +1250,11 @@ int Cli::upgrade()
         }
     }
 
+    if (fuzzyRefs.empty()) {
+        this->printer.printReply({ .code = 0, .message = "All software packages are up to date." });
+        return 0;
+    }
+
     api::types::v1::PackageManager1UpdateParameters params;
     for (const auto &fuzzyRef : fuzzyRefs) {
         api::types::v1::PackageManager1Package package;
@@ -1022,8 +1273,8 @@ int Cli::upgrade()
 
     if (pendingReply.isError()) {
         if (pendingReply.error().type() == QDBusError::AccessDenied) {
-            this->notifier->notify(api::types::v1::InteractionRequest{
-              .summary = "Permission deny, please check whether you are running as root." });
+            this->notifier->notify(
+              api::types::v1::InteractionRequest{ .summary = permissionNotifyMsg });
             return -1;
         }
 
@@ -1069,6 +1320,7 @@ int Cli::upgrade()
     }
     loop.exec();
 
+    updateAM();
     if (this->lastState != linglong::api::types::v1::State::Succeed) {
         return -1;
     }
@@ -1076,7 +1328,7 @@ int Cli::upgrade()
     return 0;
 }
 
-int Cli::search()
+int Cli::search([[maybe_unused]] CLI::App *subcommand)
 {
     LINGLONG_TRACE("command search");
 
@@ -1089,8 +1341,8 @@ int Cli::search()
 
     if (pendingReply.isError()) {
         if (pendingReply.error().type() == QDBusError::AccessDenied) {
-            this->notifier->notify(api::types::v1::InteractionRequest{
-              .summary = "Permission deny, please check whether you are running as root." });
+            this->notifier->notify(
+              api::types::v1::InteractionRequest{ .summary = permissionNotifyMsg });
             return -1;
         }
 
@@ -1137,27 +1389,29 @@ int Cli::search()
                     return;
                 }
 
-                if (!result->packages.has_value()) {
+                if (!result->packages) {
                     this->printer.printPackages({});
                     loop.exit(0);
                     return;
                 }
-                std::vector<api::types::v1::PackageInfoV2> pkgs;
 
-                if (options.showDevel) {
-                    pkgs = *result->packages;
-                } else {
-                    for (const auto &info : result->packages.value()) {
-                        if (info.packageInfoV2Module == "develop") {
-                            continue;
-                        }
-
-                        pkgs.push_back(info);
-                    }
+                auto pkgs = std::move(result->packages).value();
+                if (!options.showDevel) {
+                    auto it = std::remove_if(pkgs.begin(),
+                                             pkgs.end(),
+                                             [](const api::types::v1::PackageInfoV2 &info) {
+                                                 return info.packageInfoV2Module == "develop";
+                                             });
+                    pkgs.erase(it, pkgs.end());
                 }
 
                 if (!options.type.empty()) {
                     filterPackageInfosFromType(pkgs, options.type);
+                }
+
+                // default only the latest version is displayed
+                if (!options.showAll) {
+                    filterPackageInfosFromVersion(pkgs);
                 }
 
                 this->printer.printPackages(pkgs);
@@ -1166,7 +1420,7 @@ int Cli::search()
     return loop.exec();
 }
 
-int Cli::prune()
+int Cli::prune([[maybe_unused]] CLI::App *subcommand)
 {
     LINGLONG_TRACE("command prune");
 
@@ -1204,8 +1458,8 @@ int Cli::prune()
 
     if (pendingReply.isError()) {
         if (pendingReply.error().type() == QDBusError::AccessDenied) {
-            this->notifier->notify(api::types::v1::InteractionRequest{
-              .summary = "Permission deny, please check whether you are running as root." });
+            this->notifier->notify(
+              api::types::v1::InteractionRequest{ .summary = permissionNotifyMsg });
             return -1;
         }
 
@@ -1232,7 +1486,7 @@ int Cli::prune()
     return loop.exec();
 }
 
-int Cli::uninstall()
+int Cli::uninstall([[maybe_unused]] CLI::App *subcommand)
 {
     LINGLONG_TRACE("command uninstall");
 
@@ -1293,8 +1547,8 @@ int Cli::uninstall()
 
     if (pendingReply.isError()) {
         if (pendingReply.error().type() == QDBusError::AccessDenied) {
-            this->notifier->notify(api::types::v1::InteractionRequest{
-              .summary = "Permission deny, please check whether you are running as root." });
+            this->notifier->notify(
+              api::types::v1::InteractionRequest{ .summary = permissionNotifyMsg });
             return -1;
         }
 
@@ -1347,10 +1601,11 @@ int Cli::uninstall()
     }
     loop.exec();
 
+    updateAM();
     return this->lastState == linglong::api::types::v1::State::Succeed ? 0 : -1;
 }
 
-int Cli::list()
+int Cli::list([[maybe_unused]] CLI::App *subcommand)
 {
     LINGLONG_TRACE("command list");
 
@@ -1490,8 +1745,8 @@ int Cli::repo(CLI::App *app)
     // check error here, this operation could be failed
     if (this->pkgMan.lastError().isValid()) {
         if (this->pkgMan.lastError().type() == QDBusError::AccessDenied) {
-            this->notifier->notify(api::types::v1::InteractionRequest{
-              .summary = "Permission deny, please check whether you are running as root." });
+            this->notifier->notify(
+              api::types::v1::InteractionRequest{ .summary = permissionNotifyMsg });
             return -1;
         }
 
@@ -1500,7 +1755,7 @@ int Cli::repo(CLI::App *app)
         return -1;
     }
 
-    auto cfg = utils::serialize::fromQVariantMap<api::types::v1::RepoConfig>(propCfg);
+    auto cfg = utils::serialize::fromQVariantMap<api::types::v1::RepoConfigV2>(propCfg);
     if (!cfg) {
         qCritical() << cfg.error();
         qCritical() << "linglong bug detected.";
@@ -1523,7 +1778,7 @@ int Cli::repo(CLI::App *app)
         return EINVAL;
     }
 
-    std::string url = options.repoUrl;
+    std::string url = options.repoOptions.repoUrl;
 
     if (argsParseFunc("add") || argsParseFunc("update")) {
         if (url.rfind("http", 0) != 0) {
@@ -1532,12 +1787,14 @@ int Cli::repo(CLI::App *app)
         }
 
         // remove last slash
-        if (options.repoUrl.back() == '/') {
-            options.repoUrl.pop_back();
+        if (url.back() == '/') {
+            url.pop_back();
         }
     }
 
-    std::string name = options.repoName;
+    std::string name = options.repoOptions.repoName;
+    // if alias is not set, use name as alias
+    std::string alias = options.repoOptions.repoAlias.value_or(name);
     auto &cfgRef = *cfg;
 
     if (argsParseFunc("add")) {
@@ -1546,26 +1803,40 @@ int Cli::repo(CLI::App *app)
             return EINVAL;
         }
 
-        auto ret = cfgRef.repos.try_emplace(name, url);
-        if (!ret.second) {
+        bool isExist =
+          std::any_of(cfgRef.repos.begin(), cfgRef.repos.end(), [&alias](const auto &repo) {
+              return repo.alias.value_or(repo.name) == alias;
+          });
+        if (isExist) {
             this->printer.printErr(
-              LINGLONG_ERRV(QString{ "repo " } + name.c_str() + " already exist."));
+              LINGLONG_ERRV(QString{ "repo " } + alias.c_str() + " already exist."));
             return -1;
         }
+        auto minPriority = linglong::repo::getRepoMinPriority(cfgRef);
+        cfgRef.repos.push_back(api::types::v1::Repo{
+          .alias = options.repoOptions.repoAlias,
+          .name = name,
+          .priority = minPriority - 100,
+          .url = url,
+        });
         return this->setRepoConfig(utils::serialize::toQVariantMap(cfgRef));
     }
 
-    auto existingRepo = cfgRef.repos.find(name);
-    if (existingRepo == cfgRef.repos.cend()) {
+    auto existingRepo =
+      std::find_if(cfgRef.repos.begin(), cfgRef.repos.end(), [&alias](const auto &repo) {
+          return repo.alias.value_or(repo.name) == alias;
+      });
+
+    if (existingRepo == cfgRef.repos.end()) {
         this->printer.printErr(
           LINGLONG_ERRV(QString{ "the operated repo " } + name.c_str() + " doesn't exist"));
         return -1;
     }
 
     if (argsParseFunc("remove")) {
-        if (cfgRef.defaultRepo == name) {
+        if (cfgRef.defaultRepo == alias) {
             this->printer.printErr(
-              LINGLONG_ERRV(QString{ "repo " } + name.c_str()
+              LINGLONG_ERRV(QString{ "repo " } + alias.c_str()
                             + "is default repo, please change default repo before removing it."));
             return -1;
         }
@@ -1580,17 +1851,38 @@ int Cli::repo(CLI::App *app)
             return -1;
         }
 
-        existingRepo->second = url;
+        existingRepo->url = url;
         return this->setRepoConfig(utils::serialize::toQVariantMap(cfgRef));
     }
 
     if (argsParseFunc("set-default")) {
-        if (cfgRef.defaultRepo != name) {
-            cfgRef.defaultRepo = name;
+        if (cfgRef.defaultRepo != alias) {
+            auto maxPriority = linglong::repo::getRepoMaxPriority(cfgRef);
+            cfgRef.defaultRepo = alias;
+            for (auto &repo : cfgRef.repos) {
+                if (repo.alias.value_or(repo.name) == alias) {
+                    repo.priority = maxPriority + 100;
+                    break;
+                }
+            }
             return this->setRepoConfig(utils::serialize::toQVariantMap(cfgRef));
         }
 
         return 0;
+    }
+
+    if (argsParseFunc("set-priority")) {
+        auto isExist =
+          std::any_of(cfgRef.repos.begin(), cfgRef.repos.end(), [this](const auto &repo) {
+              return repo.priority == this->options.repoOptions.repoPriority;
+          });
+        if (isExist) {
+            this->printer.printErr(LINGLONG_ERRV(
+              QString("priority %1 already exist.").arg(this->options.repoOptions.repoPriority)));
+            return -1;
+        }
+        existingRepo->priority = options.repoOptions.repoPriority;
+        return this->setRepoConfig(utils::serialize::toQVariantMap(cfgRef));
     }
 
     this->printer.printErr(LINGLONG_ERRV("unknown operation"));
@@ -1613,8 +1905,8 @@ int Cli::setRepoConfig(const QVariantMap &config)
     this->pkgMan.setConfiguration(config);
     if (this->pkgMan.lastError().isValid()) {
         if (this->pkgMan.lastError().type() == QDBusError::AccessDenied) {
-            this->notifier->notify(api::types::v1::InteractionRequest{
-              .summary = "Permission deny, please check whether you are running as root." });
+            this->notifier->notify(
+              api::types::v1::InteractionRequest{ .summary = permissionNotifyMsg });
             return -1;
         }
 
@@ -1625,7 +1917,7 @@ int Cli::setRepoConfig(const QVariantMap &config)
     return 0;
 }
 
-int Cli::info()
+int Cli::info([[maybe_unused]] CLI::App *subcommand)
 {
     LINGLONG_TRACE("command info");
 
@@ -1691,7 +1983,7 @@ int Cli::info()
     return 0;
 }
 
-int Cli::content()
+int Cli::content([[maybe_unused]] CLI::App *subcommand)
 {
     LINGLONG_TRACE("command content");
 
@@ -1745,31 +2037,40 @@ int Cli::content()
     return 0;
 }
 
-[[nodiscard]] std::filesystem::path Cli::mappingFile(const std::filesystem::path &file) noexcept
+[[nodiscard]] std::string Cli::mappingFile(const std::filesystem::path &file) noexcept
 {
     std::error_code ec;
-    if (!std::filesystem::is_symlink(file, ec)) {
-        if (ec) {
-            qWarning() << "failed to check symlink " << file.c_str() << ":" << ec.message().c_str()
-                       << ", passing the file path to app as it is.";
-        }
+    auto target = file;
 
-        return file;
+    if (!target.is_absolute()) {
+        return target;
     }
 
-    std::array<char, PATH_MAX + 1> buf{};
-    auto *target = ::realpath(file.c_str(), buf.data());
-    if (target == nullptr) {
-        qWarning() << "resolve symlink " << file.c_str() << " error: " << ::strerror(errno)
-                   << ", passing the file path to app as it is.";
-        return file;
+    if (std::filesystem::is_symlink(file, ec)) {
+        std::array<char, PATH_MAX + 1> buf{};
+        auto *real = ::realpath(file.c_str(), buf.data());
+
+        if (real != nullptr) {
+            target = real;
+        } else {
+            qCritical() << "resolve symlink " << file.c_str() << " error: " << ::strerror(errno);
+        }
+    }
+
+    if (ec) {
+        qCritical() << "failed to check symlink " << file.c_str() << ":" << ec.message().c_str();
+    }
+
+    // Dont't mapping the file under /home
+    if (auto tmp = target.string(); tmp.rfind("/home/", 0) == 0) {
+        return target;
     }
 
     return std::filesystem::path{ "/run/host/rootfs" }
     / std::filesystem::path{ target }.lexically_relative("/");
 }
 
-[[nodiscard]] std::string Cli::mappingUrl(const std::string &url) noexcept
+[[nodiscard]] std::string Cli::mappingUrl(std::string_view url) noexcept
 {
     if (url.rfind('/', 0) == 0) {
         return mappingFile(url);
@@ -1780,11 +2081,11 @@ int Cli::content()
     constexpr std::string_view filePrefix = "file://";
     if (url.rfind(filePrefix, 0) == 0) {
         std::filesystem::path nativePath = url.substr(filePrefix.size());
-        auto target = mappingFile(nativePath);
+        std::filesystem::path target = mappingFile(nativePath);
         return std::string{ filePrefix } + target.lexically_relative("/").string();
     }
 
-    return url;
+    return std::string{ url };
 }
 
 std::vector<std::string>
@@ -1797,31 +2098,39 @@ Cli::filePathMapping(const std::vector<std::string> &command) const noexcept
     // if the --file or --url option is specified, need to map the file path to the linglong
     // path(/run/host).
     for (const auto &arg : command) {
-        if (arg.rfind("%%", 0) != 0) {
+        if (arg.rfind('%', 0) != 0) {
             execArgs.emplace_back(arg);
             continue;
         }
 
-        if (arg == "%%f" || arg == "%%F") {
-            if (arg == "%%f" && options.filePaths.size() > 1) {
+        if (arg == "%f" || arg == "%F") {
+            if (arg == "%f" && options.filePaths.size() > 1) {
                 // refer:
                 // https://specifications.freedesktop.org/desktop-entry-spec/latest/exec-variables.html
                 qWarning() << "more than one file path specified, all file paths will be passed.";
             }
 
             for (const auto &file : options.filePaths) {
+                if (file.empty()) {
+                    continue;
+                }
+
                 execArgs.emplace_back(mappingFile(file));
             }
 
             continue;
         }
 
-        if (arg == "%%u" || arg == "%%U") {
-            if (arg == "%%u" && options.fileUrls.size() > 1) {
+        if (arg == "%u" || arg == "%U") {
+            if (arg == "%u" && options.fileUrls.size() > 1) {
                 qWarning() << "more than one url specified, all file paths will be passed.";
             }
 
             for (const auto &url : options.fileUrls) {
+                if (url.empty()) {
+                    continue;
+                }
+
                 execArgs.emplace_back(mappingUrl(url));
             }
 
@@ -1853,6 +2162,46 @@ void Cli::filterPackageInfosFromType(std::vector<api::types::v1::PackageInfoV2> 
 
     list.clear();
     std::move(temp.begin(), temp.end(), std::back_inserter(list));
+}
+
+utils::error::Result<void>
+Cli::filterPackageInfosFromVersion(std::vector<api::types::v1::PackageInfoV2> &list) noexcept
+{
+    LINGLONG_TRACE("filter package infos from version");
+
+    std::unordered_map<std::string, api::types::v1::PackageInfoV2> temp;
+
+    for (const auto &info : list) {
+        auto key = QString("%1-%2")
+                     .arg(QString::fromStdString(info.id))
+                     .arg(QString::fromStdString(info.packageInfoV2Module))
+                     .toStdString();
+        auto it = temp.find(key);
+        if (it == temp.end()) {
+            temp[key] = info;
+            continue;
+        }
+
+        auto oldVersion = package::Version::parse(QString::fromStdString(it->second.version));
+        if (!oldVersion) {
+            return LINGLONG_ERR("failed to parse old version", oldVersion.error());
+        }
+        auto newVersion = package::Version::parse(QString::fromStdString(info.version));
+        if (!newVersion) {
+            return LINGLONG_ERR("failed to parse new version", newVersion.error());
+        }
+
+        if (*oldVersion < *newVersion) {
+            temp[key] = info;
+        }
+    }
+
+    list.clear();
+    std::transform(temp.begin(), temp.end(), std::back_inserter(list), [](const auto &pair) {
+        return pair.second;
+    });
+
+    return LINGLONG_OK;
 }
 
 utils::error::Result<void> Cli::runningAsRoot()
@@ -1893,4 +2242,418 @@ QDBusReply<QString> Cli::authorization()
                                   this->pkgMan.connection());
     return dbusIntrospect.call("Permissions");
 }
+
+utils::error::Result<void>
+Cli::RequestDirectories(const api::types::v1::PackageInfoV2 &info) noexcept
+{
+    LINGLONG_TRACE("request directories");
+
+    // TODO: skip request directories for now
+    return LINGLONG_OK;
+
+    auto userHome = qgetenv("HOME").toStdString();
+    if (userHome.empty()) {
+        return LINGLONG_ERR("HOME is not set, skip request directories");
+    }
+
+    QDir dialogPath = QDir{ LINGLONG_LIBEXEC_DIR }.filePath("dialog");
+    if (auto runtimeDir = qgetenv("LINGLONG_PERMISSION_DIALOG_DIR"); !runtimeDir.isEmpty()) {
+        dialogPath.setPath(runtimeDir);
+    }
+
+    auto appDataDir = utils::xdg::appDataDir(info.id);
+    if (!appDataDir) {
+        return LINGLONG_ERR(appDataDir);
+    }
+
+    // make sure app data dir exists
+    auto dir = QDir{ appDataDir->c_str() };
+    if (!dir.mkpath(".")) {
+        return LINGLONG_ERR(QString("make app data directory failed %1").arg(appDataDir->c_str()));
+    }
+
+    auto permissions = QDir{ appDataDir->c_str() }.absoluteFilePath("permissions.json");
+    if (QFileInfo::exists(permissions)) {
+        return LINGLONG_OK;
+    }
+
+    auto fd = ::shm_open(info.id.c_str(), O_RDWR | O_CREAT, 0600);
+    if (fd < 0) {
+        return LINGLONG_ERR(QString{ "shm_open error:" } + ::strerror(errno));
+    }
+    auto closeFd = utils::finally::finally([fd] {
+        ::close(fd);
+    });
+
+    struct flock lock{
+        .l_type = F_WRLCK,
+        .l_whence = SEEK_SET,
+        .l_start = 0,
+        .l_len = 0,
+    };
+
+    // all later processes should be blocked
+    bool anotherRunning{ false };
+    while (true) {
+        using namespace std::chrono_literals;
+        auto ret = ::fcntl(fd, F_SETLK, &lock);
+        if (ret == -1) {
+            if (errno == EACCES || errno == EAGAIN || errno == EINTR) {
+                anotherRunning = true;
+                std::this_thread::sleep_for(1s);
+                continue;
+            }
+
+            return LINGLONG_ERR(QString{ "fcntl lock error: " } + ::strerror(errno));
+        }
+
+        if (!anotherRunning) {
+            break;
+        }
+
+        lock.l_type = F_UNLCK;
+        ret = ::fcntl(fd, F_SETLK, &lock);
+        if (ret == -1) {
+            return LINGLONG_ERR(QString{ "fcntl unlock error: " } + ::strerror(errno));
+        }
+
+        return LINGLONG_OK;
+    }
+
+    // unlink by creator
+    auto releaseResource = utils::finally::finally([&info, &lock, fd] {
+        lock.l_type = F_UNLCK;
+        if (::fcntl(fd, F_SETLK, &lock) == -1) {
+            qDebug() << "failed to unlock mem file:" << ::strerror(errno);
+        }
+
+        if (::shm_unlink(info.id.c_str()) == -1) {
+            qDebug() << "shm_unlink error:" << ::strerror(errno);
+        }
+    });
+
+    std::vector<api::types::v1::XdgDirectoryPermission> requiredDirs = {
+        { .allowed = true, .dirType = "Desktop" },   { .allowed = true, .dirType = "Documents" },
+        { .allowed = true, .dirType = "Downloads" }, { .allowed = true, .dirType = "Music" },
+        { .allowed = true, .dirType = "Pictures" },  { .allowed = true, .dirType = "Videos" }
+    };
+    if (info.permissions && info.permissions->xdgDirectories) {
+        requiredDirs = info.permissions->xdgDirectories.value();
+    }
+
+    if (requiredDirs.empty()) {
+        qDebug() << "no required directories.";
+        return LINGLONG_OK;
+    }
+
+    auto availableDialogs =
+      dialogPath.entryInfoList(QDir::Executable | QDir::Files | QDir::NoSymLinks, QDir::Name);
+    if (availableDialogs.empty()) {
+        return LINGLONG_ERR("no available dialog");
+    }
+
+    auto dialogBin = availableDialogs.first().absoluteFilePath();
+    QProcess dialogProc;
+    dialogProc.setProgram(dialogBin);
+    dialogProc.start();
+    if (!dialogProc.waitForReadyRead(1000)) {
+        dialogProc.kill();
+        return LINGLONG_ERR("wait for reading from dialog " + dialogBin
+                            + "failed:" + dialogProc.errorString());
+    }
+
+    auto rawData = dialogProc.read(4);
+    auto *len = reinterpret_cast<uint32_t *>(rawData.data());
+    rawData = dialogProc.read(*len);
+    auto version = utils::serialize::LoadJSON<api::types::v1::DialogMessage>(rawData);
+    if (!version) {
+        dialogProc.kill();
+        return LINGLONG_ERR("error reply from dialog:" + version.error().message());
+    }
+
+    if (version->type != "Handshake") {
+        dialogProc.kill();
+        return LINGLONG_ERR("dialog message type is not Handshake");
+    }
+
+    auto handshake =
+      utils::serialize::LoadJSON<api::types::v1::DialogHandShakePayload>(version->payload);
+    if (!handshake) {
+        dialogProc.kill();
+        return LINGLONG_ERR(" handshake message error:" + handshake.error().message());
+    }
+
+    if (handshake->version != "1.0") {
+        dialogProc.kill();
+        return LINGLONG_ERR(
+          QString{ "incompatible version of dialog message protocol : required 1.0, actual " }
+          + handshake->version.c_str());
+    }
+
+    auto request = api::types::v1::ApplicationPermissionsRequest{ .appID = info.id,
+                                                                  .xdgDirectories = requiredDirs };
+    api::types::v1::DialogMessage msg{ .payload = nlohmann::json(request).dump(),
+                                       .type = "Request" };
+    auto data = nlohmann::json(msg).dump();
+    uint32_t size = data.size();
+    rawData = QByteArray{ reinterpret_cast<char *>(&size), 4 };
+    rawData.append(data.c_str());
+
+    dialogProc.write(rawData);
+    dialogProc.closeWriteChannel();
+    if (!dialogProc.waitForFinished(16 * 1000)) {
+        qWarning() << dialogProc.readAllStandardError();
+        dialogProc.kill();
+        return LINGLONG_ERR("dialog timeout");
+    }
+
+    bool allowRequired{ true };
+    if (dialogProc.exitCode() != 0) {
+        qDebug() << "dialog exited with code" << dialogProc.exitCode() << ":"
+                 << dialogProc.readAllStandardError();
+        allowRequired = false;
+    }
+
+    std::for_each(requiredDirs.begin(),
+                  requiredDirs.end(),
+                  [allowRequired](api::types::v1::XdgDirectoryPermission &dir) {
+                      dir.allowed = allowRequired;
+                  });
+    api::types::v1::ApplicationConfigurationPermissions privs{ .xdgDirectories = requiredDirs };
+    auto content = QByteArray::fromStdString(nlohmann::json(privs).dump());
+
+    QFile permissionFile{ permissions };
+    if (!permissionFile.open(QIODevice::WriteOnly | QIODevice::NewOnly | QIODevice::Text)) {
+        return LINGLONG_ERR(permissionFile);
+    }
+
+    if (permissionFile.write(content) != content.size()) {
+        qWarning() << "incomplete write to" << permissions << ":" << permissionFile.errorString();
+    }
+
+    return LINGLONG_OK;
+}
+
+int Cli::generateCache(const package::Reference &ref)
+{
+    LINGLONG_TRACE("generate cache for all applications");
+    QEventLoop loop;
+    QString jobIDReply;
+    auto ret = connect(&this->pkgMan,
+                       &api::dbus::v1::PackageManager::GenerateCacheFinished,
+                       [&loop, &jobIDReply](const QString &jobID, bool success) {
+                           if (jobIDReply != jobID) {
+                               return;
+                           }
+                           if (!success) {
+                               loop.exit(-1);
+                               return;
+                           }
+                           loop.exit(0);
+                       });
+
+    auto pendingReply = this->pkgMan.GenerateCache(ref.toString());
+    pendingReply.waitForFinished();
+    if (pendingReply.isError()) {
+        auto err = LINGLONG_ERRV(pendingReply.error().message());
+        this->printer.printErr(err);
+        return -1;
+    }
+
+    auto result = utils::serialize::fromQVariantMap<api::types::v1::PackageManager1JobInfo>(
+      pendingReply.value());
+    if (!result) {
+        this->printer.printErr(result.error());
+        return -1;
+    }
+
+    if (!result->id) {
+        this->printer.printErr(
+          LINGLONG_ERRV("\n" + QString::fromStdString(result->message), result->code));
+        return -1;
+    }
+
+    jobIDReply = QString::fromStdString(result->id.value());
+    return loop.exec();
+}
+
+utils::error::Result<std::string>
+Cli::ensureCache(const package::Reference &ref,
+                 const api::types::v1::RepositoryCacheLayersItem &appLayerItem) noexcept
+{
+    LINGLONG_TRACE("ensure cache for: " + QString::fromStdString(appLayerItem.info.id));
+
+    int lockfd{ -1 };
+    std::error_code ec;
+    auto appCache = std::filesystem::path(LINGLONG_ROOT) / "cache" / appLayerItem.commit;
+    const auto fileLock = std::filesystem::path("/run/linglong/") / appLayerItem.commit / ".lock";
+
+    struct flock locker{ .l_type = F_WRLCK, .l_whence = SEEK_SET, .l_start = 0, .l_len = 0 };
+
+    // Note: If the cache directory exists, check if there is a file lock.
+    //       If the lock file is not exist, it means that the cache has been generated.
+    if (std::filesystem::exists(appCache, ec)) {
+        if (!std::filesystem::exists(fileLock, ec)) {
+            if (ec) {
+                return LINGLONG_ERR(QString::fromStdString(ec.message()), ec.value());
+            }
+            return appCache;
+        }
+
+        lockfd = open(fileLock.c_str(), O_CREAT | O_RDWR, 0644);
+        if (lockfd < 0) {
+            return LINGLONG_ERR("failed to open file lock " % QString::fromStdString(fileLock), -1);
+        }
+        auto closefd = utils::finally::finally([&lockfd] {
+            close(lockfd);
+        });
+
+        while (true) {
+            // Block here until the write lock is successfully set
+            using namespace std::chrono_literals;
+            if (::fcntl(lockfd, F_SETLK, &locker) == 0) {
+                break;
+            }
+            if (errno == EACCES || errno == EAGAIN || errno == EINTR) {
+                std::this_thread::sleep_for(100ms);
+            } else {
+                return LINGLONG_ERR(QString("failed to set lock ") % ::strerror(errno), -1);
+            }
+        }
+        locker.l_type = F_UNLCK;
+        if (::fcntl(lockfd, F_SETLK, &locker)) {
+            return LINGLONG_ERR("failed to unlock" % QString::fromStdString(appCache), -1);
+        }
+
+        return appCache;
+    }
+
+    if (ec) {
+        return LINGLONG_ERR(QString::fromStdString(ec.message()), ec.value());
+    }
+
+    if (!std::filesystem::create_directories(fileLock.parent_path(), ec) && ec) {
+        return LINGLONG_ERR(
+          QString{ "failed to create runtime directory %1: %2" }.arg(fileLock.parent_path().c_str(),
+                                                                     ec.message().c_str()));
+    }
+
+    lockfd = open(fileLock.c_str(), O_CREAT | O_RDWR, 0644);
+    if (lockfd < 0) {
+        return LINGLONG_ERR(
+          QString{ "failed to open file lock %1: %2" }.arg(fileLock.c_str(), ::strerror(errno)));
+    }
+
+    auto closefd = utils::finally::finally([&lockfd] {
+        close(lockfd);
+    });
+
+    if (::fcntl(lockfd, F_SETLK, &locker) == -1) {
+        return LINGLONG_ERR("failed to lock" + QString::fromStdString(appCache), -1);
+    }
+
+    // Try to generate cache here
+    QProcess process;
+    process.setProgram(LINGLONG_LIBEXEC_DIR "/ll-dialog");
+    process.setArguments({ "-m", "startup", "--id", QString::fromStdString(appLayerItem.info.id) });
+    process.start();
+    qDebug() << process.program() << process.arguments();
+
+    auto ret = this->generateCache(ref);
+    if (ret != 0) {
+        this->notifier->notify(api::types::v1::InteractionRequest{
+          .summary =
+            _("The cache generation failed, please uninstall and reinstall the application.") });
+    }
+    process.close();
+
+    locker.l_type = F_UNLCK;
+    if (::fcntl(lockfd, F_SETLK, &locker)) {
+        return LINGLONG_ERR("failed to unlock" + QString::fromStdString(appCache), -1);
+    }
+
+    return appCache;
+}
+
+void Cli::updateAM() noexcept
+{
+    // NOTE: make sure AM refresh the cache of desktop
+    if ((QSysInfo::productType() == "Deepin" || QSysInfo::productType() == "deepin")
+        && this->lastState == linglong::api::types::v1::State::Succeed) {
+        QDBusConnection conn = QDBusConnection::systemBus();
+        if (!conn.isConnected()) {
+            qWarning() << "Failed to connect to the system bus";
+        }
+
+        auto peer = linglong::api::dbus::v1::DBusPeer("org.desktopspec.ApplicationUpdateNotifier1",
+                                                      "/org/desktopspec/ApplicationUpdateNotifier1",
+                                                      conn);
+        auto reply = peer.Ping();
+        reply.waitForFinished();
+        if (!reply.isValid()) {
+            qWarning() << "Failed to ping org.desktopspec.ApplicationUpdateNotifier1"
+                       << reply.error();
+        }
+    }
+}
+
+int Cli::inspect([[maybe_unused]] CLI::App *subcommand)
+{
+    auto myContainersRet = getCurrentContainers();
+    if (!myContainersRet) {
+        this->printer.printErr(myContainersRet.error());
+        return -1;
+    }
+    const auto &myContainers = *myContainersRet;
+
+    api::types::v1::InspectResult result;
+
+    if (this->options.pid) {
+        qDebug() << "inspect by pid:" << this->options.pid.value();
+        for (const auto &container : myContainers) {
+            auto ret = isChildProcess(container.pid, this->options.pid.value());
+            if (!ret) {
+                this->printer.printErr(ret.error());
+                return -1;
+            }
+
+            if (*ret) {
+                result.appID = container.package;
+                break;
+            }
+        }
+    }
+
+    this->printer.printInspect(result);
+    return 0;
+}
+
+int Cli::dir([[maybe_unused]] CLI::App *subcommand)
+{
+    LINGLONG_TRACE("command dir");
+
+    auto fuzzyRef = package::FuzzyReference::parse(QString::fromStdString(options.appid));
+    if (!fuzzyRef) {
+        this->printer.printErr(fuzzyRef.error());
+        return -1;
+    }
+
+    auto ref = this->repository.clearReference(*fuzzyRef,
+                                               { .forceRemote = false, .fallbackToRemote = false });
+    if (!ref) {
+        qDebug() << ref.error();
+        this->printer.printErr(LINGLONG_ERRV("Can not find such application."));
+        return -1;
+    }
+
+    auto layerItem = this->repository.getLayerItem(*ref);
+    if (!layerItem) {
+        this->printer.printErr(layerItem.error());
+        return -1;
+    }
+
+    std::cout << layerItem->commit << std::endl;
+    return 0;
+}
+
 } // namespace linglong::cli

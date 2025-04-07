@@ -26,7 +26,7 @@
 
 #include <gio/gio.h>
 #include <glib.h>
-#include <nlohmann/json_fwd.hpp>
+#include <nlohmann/json.hpp>
 #include <ostree-repo.h>
 
 #include <QCryptographicHash>
@@ -1814,6 +1814,9 @@ OSTreeRepo::exportEntries(const std::filesystem::path &rootEntriesDir,
                     << appEntriesDir.c_str() << "not exists.";
         return LINGLONG_OK;
     }
+
+    // TODO: The current whitelist logic is not very flexible.
+    // The application configuration file can be exported after configuring it in the build configuration file(linglong.yaml).
     std::vector<std::string> exportPaths = {
         "share/applications", // Copy desktop files
         "share/mime",         // Copy MIME Type files
@@ -1826,26 +1829,27 @@ OSTreeRepo::exportEntries(const std::filesystem::path &rootEntriesDir,
                          // maybe used by the host dde-file-manager.
         "share/deepin-manual",     // copy deepin-manual files
         "share/deepin-elf-verify", // for uab signature
-        "share/dsg" // Copy dsg conf，the configuration file is used for self-developed
-                    // applications.
+        "share/dsg",      // Copy dsg conf，the configuration file is used for self-developed
+                          // applications.
+        "share/templates" // Copy templates file for some applications such as wps
     };
-    // 如果存在lib/systemd目录，则导出lib/systemd，否则导出share/systemd
-    exists = std::filesystem::exists(appEntriesDir / "lib/systemd", ec);
+    // 如果存在lib/systemd目录，优先导出lib/systemd，否则导出share/systemd（为兼容旧应用，新应用应该逐步将配置文件放在lib/systemd目录下）
+    exists = std::filesystem::exists(appEntriesDir / "lib/systemd/user", ec);
     if (ec) {
         return LINGLONG_ERR("Failed to check the existence of lib/systemd directory: {}", ec);
     }
     if (exists) {
-        exportPaths.push_back("lib/systemd");
+        exportPaths.push_back("lib/systemd/user");
     } else {
-        exportPaths.push_back("share/systemd");
+        exportPaths.push_back("share/systemd/user");
     }
     // 导出应用entries目录下的所有文件到玲珑仓库的entries目录下
     for (const auto &path : exportPaths) {
         auto source = appEntriesDir / path;
         auto destination = rootEntriesDir / path;
         // 将 share/systemd 目录下的文件导出到 lib/systemd 目录下
-        if (path == "share/systemd") {
-            destination = rootEntriesDir / "lib/systemd";
+        if (path == "share/systemd/user") {
+            destination = rootEntriesDir / "lib/systemd/user";
         }
         // 检查源目录是否存在，跳过不存在的目录
         exists = std::filesystem::exists(source, ec);

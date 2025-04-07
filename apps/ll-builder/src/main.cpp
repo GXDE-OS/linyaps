@@ -286,7 +286,7 @@ You can report bugs to the linyaps team under this project: https://github.com/O
 
     // build export
     bool layerMode = false;
-    linglong::builder::ExportOption ExportOption{ .exportDevelop = false, .exportI18n = true };
+    linglong::builder::ExportOption ExportOption{ .exportI18n = true };
     auto *buildExport = commandParser.add_subcommand("export", _("Export to linyaps layer or uab"));
     buildExport->usage(_("Usage: ll-builder export [OPTIONS]"));
 
@@ -311,6 +311,8 @@ You can report bugs to the linyaps team under this project: https://github.com/O
       ->type_name("FILE")
       ->check(CLI::ExistingFile)
       ->excludes(layerFlag, fullOpt);
+    buildExport->add_flag("--no-develop", ExportOption.noExportDevelop, _("Don't export the develop module"))
+        ->needs(layerFlag);
 
     // build push
     std::string pushModule;
@@ -490,6 +492,12 @@ You can report bugs to the linyaps team under this project: https://github.com/O
         return -1;
     }
 
+    // set GIO_USE_VFS to local, avoid glib start thread
+    char *oldEnv = getenv("GIO_USE_VFS");
+    if (-1 == setenv("GIO_USE_VFS", "local", 1)) {
+        qWarning() << "failed to GIO_USE_VFS to local" << errno;
+    }
+
     auto result = linglong::repo::tryMigrate(builderCfg->repo, *repoCfg);
     if (result == linglong::repo::MigrateResult::Failed) {
         auto pathTemp = (std::filesystem::path{ builderCfg->repo }.parent_path()
@@ -525,12 +533,6 @@ You can report bugs to the linyaps team under this project: https://github.com/O
     if (!repoRoot.exists() && !repoRoot.mkpath(".")) {
         qCritical() << "failed to create the repository of builder.";
         return -1;
-    }
-
-    // set GIO_USE_VFS to local, avoid glib start thread
-    char *oldEnv = getenv("GIO_USE_VFS");
-    if (-1 == setenv("GIO_USE_VFS", "local", 1)) {
-        qWarning() << "failed to GIO_USE_VFS to local" << errno;
     }
 
     linglong::repo::OSTreeRepo repo(repoRoot, *repoCfg, clientFactory);
@@ -814,7 +816,7 @@ You can report bugs to the linyaps team under this project: https://github.com/O
             if (!ExportOption.compressor.empty()) {
                 compressor = ExportOption.compressor.c_str();
             }
-            auto result = builder.exportLayer(QDir::currentPath(), compressor);
+            auto result = builder.exportLayer(QDir::currentPath(), compressor, ExportOption.noExportDevelop);
             if (!result) {
                 qCritical() << result.error();
                 return -1;

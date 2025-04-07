@@ -124,10 +124,11 @@ PackageManager::PackageManager(linglong::repo::OSTreeRepo &repo,
 
     auto *timer = new QTimer(this);
     timer->setInterval(deferredTimeOut);
-    timer->callOnTimeout([this, timer] {
+    connect(timer, &QTimer::timeout, [this, timer] {
         this->deferredUninstall();
         timer->start();
     });
+
     timer->start();
 }
 
@@ -646,7 +647,7 @@ QVariantMap PackageManager::installFromLayer(const QDBusUnixFileDescriptor &fd,
 
           auto unmountLayer = utils::finally::finally([mountPoint = layerDir->absolutePath()] {
               if (QFileInfo::exists(mountPoint)) {
-                  auto ret = utils::command::Exec("umount", { mountPoint });
+                  auto ret = utils::command::Exec("fusermount", { "-z", "-u", mountPoint });
                   if (!ret) {
                       qCritical() << "failed to umount " << mountPoint
                                   << ", please umount it manually";

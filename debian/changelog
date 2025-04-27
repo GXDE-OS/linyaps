@@ -1,4 +1,12 @@
-linglong (1.8.0-2) unstable; urgency=medium
+linglong (1.8.1-1) unstable; urgency=medium
+
+  * fix: merge runtime module also
+  * fix: avoid gio start thread before unshare
+  * fix: unable to start the app normally when switching accounts
+
+ -- dengbo <dengbo@deepin.org>  Thu, 17 Apr 2025 15:56:21 +0800
+
+linglong (1.8.0-1) unstable; urgency=medium
 
   * feat: support don't export the develop module
   * feat: add share/templates dir to whitelist
@@ -6,7 +14,6 @@ linglong (1.8.0-2) unstable; urgency=medium
   * fix: ll-builder build failed
   * fix: version comparison error
   * fix: fix unshare error
-  * fix: Use qt5 as default as Debian 12 Qt6 is not new enough
 
  -- dengbo <dengbo@deepin.org>  Wed, 02 Apr 2025 16:57:23 +0800
 

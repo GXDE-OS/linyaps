@@ -134,8 +134,8 @@ parseProjectConfig(const QString &filename)
     if (!project) {
         return project;
     }
-    auto version = linglong::package::Version(QString::fromStdString(project->package.version));
-    if (!version.tweak) {
+    auto version = linglong::package::Version::parse(QString::fromStdString(project->package.version));
+    if (!version || !version->tweak) {
         return LINGLONG_ERR("Please ensure the package.version number has three parts formatted as "
                             "'MAJOR.MINOR.PATCH.TWEAK'");
     }
@@ -297,7 +297,7 @@ You can report bugs to the linyaps team under this project: https://github.com/O
     buildExport
       ->add_option("-z, --compressor",
                    ExportOption.compressor,
-                   "supported compressors are: lz4(uab default), lzam(layer default), zstd")
+                   "supported compressors are: lz4(default), lzma, zstd")
       ->type_name("X");
     auto *iconOpt =
       buildExport->add_option("--icon", ExportOption.iconPath, _("Uab icon (optional)"))

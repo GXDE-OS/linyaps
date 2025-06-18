@@ -547,21 +547,16 @@ OSTreeRepo::removeOstreeRef(const api::types::v1::RepositoryCacheLayersItem &lay
                                     FALSE,
                                     OstreeRepoResolveRevExtFlags::OSTREE_REPO_RESOLVE_REV_EXT_NONE,
                                     &rev,
-                                    &gErr)
-        == FALSE) {
-        return LINGLONG_ERR(QString{ "couldn't resolve ref %1 on local machine" }.arg(
-                              QString::fromStdString(refspec)),
-                            gErr);
-    }
-
-    if (ostree_repo_set_ref_immediate(this->ostreeRepo.get(),
-                                      layer.repo.c_str(),
-                                      ref.c_str(),
-                                      nullptr,
-                                      nullptr,
-                                      &gErr)
-        == FALSE) {
-        return LINGLONG_ERR("ostree_repo_set_ref_immediate", gErr);
+                                    &gErr)) {
+        if (ostree_repo_set_ref_immediate(this->ostreeRepo.get(),
+                                          layer.repo.c_str(),
+                                          ref.c_str(),
+                                          nullptr,
+                                          nullptr,
+                                          &gErr)
+            == FALSE) {
+            return LINGLONG_ERR("ostree_repo_set_ref_immediate", gErr);
+        }
     }
 
     auto ret = this->cache->deleteLayerItem(layer);
@@ -1576,6 +1571,14 @@ void OSTreeRepo::unexportReference(const package::Reference &ref) noexcept
         }
 
         if (!info.isSymLink()) {
+            // update-desktop-database and update-mime-database will generate system files in
+            // specify a directory. these files do not belong to the applications and should not be
+            // printed in the log.
+            if (info.absoluteFilePath().contains("share/mime")
+                || info.absoluteFilePath().contains("share/applications")) {
+                continue;
+            }
+
             // NOTE: Everything in entries should be directory or symbol link.
             // But it can be some cache file, we should not remove it too.
             qWarning() << "Invalid file detected." << info.absoluteFilePath();

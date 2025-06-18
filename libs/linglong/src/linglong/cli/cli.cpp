@@ -1410,7 +1410,7 @@ int Cli::search([[maybe_unused]] CLI::App *subcommand)
                 }
 
                 // default only the latest version is displayed
-                if (!options.showAll) {
+                if (!options.showAllVersion) {
                     filterPackageInfosFromVersion(pkgs);
                 }
 
@@ -1643,7 +1643,7 @@ Cli::listUpgradable(const std::string &type)
     }
 
     if (!type.empty()) {
-        filterPackageInfosFromType(*pkgs, options.type);
+        filterPackageInfosFromType(*pkgs, type);
     }
 
     std::vector<api::types::v1::UpgradeListResult> upgradeList;
@@ -2003,6 +2003,17 @@ int Cli::content([[maybe_unused]] CLI::App *subcommand)
         return -1;
     }
 
+    auto layerItem = this->repository.getLayerItem(*ref);
+    if (!layerItem) {
+        this->printer.printErr(layerItem.error());
+        return -1;
+    }
+
+    if (layerItem->info.kind != "app") {
+        this->printer.printErr(LINGLONG_ERRV("Only supports viewing app content"));
+        return -1;
+    }
+
     auto layer = this->repository.getLayerDir(*ref, "binary");
     if (!layer) {
         this->printer.printErr(layer.error());
@@ -2082,7 +2093,7 @@ int Cli::content([[maybe_unused]] CLI::App *subcommand)
     if (url.rfind(filePrefix, 0) == 0) {
         std::filesystem::path nativePath = url.substr(filePrefix.size());
         std::filesystem::path target = mappingFile(nativePath);
-        return std::string{ filePrefix } + target.lexically_relative("/").string();
+        return std::string{ filePrefix } + target.string();
     }
 
     return std::string{ url };

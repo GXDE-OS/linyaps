@@ -7,6 +7,8 @@
 #include "linglong/cli/json_printer.h"
 
 #include "linglong/api/types/v1/Generators.hpp"
+#include "linglong/cli/cli.h"
+#include "linglong/package/version.h"
 
 #include <QJsonArray>
 
@@ -27,8 +29,42 @@ void JSONPrinter::printPackage(const api::types::v1::PackageInfoV2 &info)
     std::cout << nlohmann::json(info).dump() << std::endl;
 }
 
+void JSONPrinter::printPackages(const std::vector<api::types::v1::PackageInfoDisplay> &list)
+{
+    std::cout << nlohmann::json(list).dump() << std::endl;
+}
+
 void JSONPrinter::printPackages(const std::vector<api::types::v1::PackageInfoV2> &list)
 {
+    std::cout << nlohmann::json(list).dump() << std::endl;
+}
+
+void JSONPrinter::printSearchResult(
+  std::map<std::string, std::vector<api::types::v1::PackageInfoV2>> list)
+{
+    // 搜索结果排序, 优先级为 repo > id > channel > module > version, 高版本在前
+    for (auto &[repo, packages] : list) {
+        std::sort(packages.begin(), packages.end(), [](const auto &lhs, const auto &rhs) {
+            if (lhs.id != rhs.id)
+                return lhs.id < rhs.id;
+            if (lhs.channel != rhs.channel)
+                return lhs.channel < rhs.channel;
+            if (lhs.packageInfoV2Module != rhs.packageInfoV2Module)
+                return lhs.packageInfoV2Module < rhs.packageInfoV2Module;
+
+            auto lhsVer = package::Version::parse(lhs.version.c_str());
+            if (!lhsVer) {
+                return false;
+            }
+            auto rhsVer = package::Version::parse(rhs.version.c_str());
+            if (!rhsVer) {
+                return false;
+            }
+
+            return *lhsVer > *rhsVer;
+        });
+    }
+
     std::cout << nlohmann::json(list).dump() << std::endl;
 }
 
@@ -86,6 +122,11 @@ void JSONPrinter::printUpgradeList(std::vector<api::types::v1::UpgradeListResult
 void JSONPrinter::printInspect(const api::types::v1::InspectResult &result)
 {
     std::cout << nlohmann::json(result).dump(4) << std::endl;
+}
+
+void JSONPrinter::printMessage(const QString &message)
+{
+    std::cout << nlohmann::json{ { "message", message.toStdString() } }.dump() << std::endl;
 }
 
 } // namespace linglong::cli

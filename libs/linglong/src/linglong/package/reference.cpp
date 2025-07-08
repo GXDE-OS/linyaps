@@ -60,7 +60,7 @@ Reference::fromPackageInfo(const api::types::v1::PackageInfoV2 &info) noexcept
     if (!version) {
         return LINGLONG_ERR(version);
     }
-    if (!version->tweak) {
+    if (version->isVersionV1() && !version->hasTweak()) {
         return LINGLONG_ERR("version .tweak is required");
     }
 
@@ -171,6 +171,38 @@ utils::error::Result<Reference> Reference::fromVariantMap(const QVariantMap &dat
     }
 
     return *reference;
+}
+
+utils::error::Result<Reference>
+Reference::fromBuilderProject(const api::types::v1::BuilderProject &project) noexcept
+{
+    LINGLONG_TRACE("parse reference from BuilderProject");
+
+    auto version = package::Version::parse(QString::fromStdString(project.package.version));
+    if (!version) {
+        return LINGLONG_ERR(version);
+    }
+
+    auto architecture = package::Architecture::currentCPUArchitecture();
+    if (project.package.architecture) {
+        architecture = package::Architecture::parse(*project.package.architecture);
+    }
+    if (!architecture) {
+        return LINGLONG_ERR(architecture);
+    }
+    std::string channel = "main";
+    if (project.package.channel.has_value()) {
+        channel = *project.package.channel;
+    }
+    auto ref = package::Reference::create(QString::fromStdString(channel),
+                                          QString::fromStdString(project.package.id),
+                                          *version,
+                                          *architecture);
+    if (!ref) {
+        return LINGLONG_ERR(ref);
+    }
+
+    return ref;
 }
 
 } // namespace linglong::package

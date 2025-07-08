@@ -14,8 +14,13 @@
 # Webkit style was loosely based on the Qt style
 BasedOnStyle: WebKit
 
+<<<<<<< HEAD
 # deepin project might not use same standard.
 Standard: Auto
+=======
+# linyaps strict to use c++17
+Standard: c++17
+>>>>>>> c7559ffe7c6b24faa6ffc3ab0a65304d0ab4921c
 
 # Column width is limited to 100 in accordance with Qt Coding Style.
 # https://wiki.qt.io/Qt_Coding_Style
@@ -31,8 +36,13 @@ CommentPragmas: "^!|^:|^ SPDX-License-Identifier:"
 
 PointerAlignment: Right
 
+<<<<<<< HEAD
 # We use template< without space.
 SpaceAfterTemplateKeyword: false
+=======
+# We use template < with space.
+SpaceAfterTemplateKeyword: true
+>>>>>>> c7559ffe7c6b24faa6ffc3ab0a65304d0ab4921c
 
 # We want to break before the operators, but not before a '='.
 BreakBeforeBinaryOperators: NonAssignment

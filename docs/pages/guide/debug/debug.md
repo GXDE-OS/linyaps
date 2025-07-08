@@ -24,7 +24,7 @@ SPDX-License-Identifier: LGPL-3.0-or-later
 
 ### 在运行环境调试应用
 
-调试环境和用户正常使用的运行环境是存在小部分差异的，如果需要直接在运行环境中调试应用，可以使用 `ll-builder run --exec /bin/bash` 进入容器，然后执行 `gdbserver 127.0.0.1:12345 /opt/apps/org.deepin.demo/binary/demo` ，gdbserver 会使用 tcp 协议监听 12345 端口并等待 gdb 连接。
+调试环境和用户正常使用的运行环境是存在小部分差异的，如果需要直接在运行环境中调试应用，可以使用 `ll-builder run --exec /bin/bash` 进入容器，然后执行 `gdbserver 127.0.0.1:12345 /opt/apps/org.deepin.demo/bin/demo` ，gdbserver 会使用 tcp 协议监听 12345 端口并等待 gdb 连接。
 
 再打开一个宿主机终端，在项目目录执行 `gdb`，按行输入以下指令：
 
@@ -34,7 +34,7 @@ set debug-file-directory /tmp/org.deepin.demo/linglong/output/develop/files/lib/
 target remote 127.0.0.1:12345
 ```
 
-即可使用 gdb 通过 tcp 协议连接到运行环境中的 gdbserver 调试应用。使用`ll-cli run $appid --exec /bin/bash` 也可使用 gdbserver
+即可使用 gdb 通过 tcp 协议连接到运行环境中的 gdbserver 调试应用。
 
 _如果运行环境没有 gdbserver 命令，请检查应用是否使用 org.deepin.base 作为 base，尝试升级到最新版本的 org.deepin.base。_
 
@@ -117,7 +117,7 @@ Init Commands: `set substitute-path /project /tmp/org.deepin.demo`
 
 如意玲珑在构建应用后会自动剥离二进制的调试符号，并存放到 `$PREFIX/lib/debug` 目录，但是一些工具链会在构建时提前将调试符号剥离，这会导致如意玲珑无法在二进制文件中找到这些符号，如果你的项目是使用 qmake，需要在 pro 文件中添加以下配置
 
-```
+```bash
 # 如意玲珑在CFLAGS和CXXFLAGS环境变量里设置了-g选项，这里需要qmake继承这个环境变量
 QMAKE_CFLAGS += $$(CFLAGS)
 QMAKE_CXXFLAGS += $$(CXXFLAGS)
@@ -126,3 +126,47 @@ CONFIG += debug
 ```
 
 cmake 会自动使用 cflags 和 cxxflags 环境变量，所以不需要额外配置。其他构建工具可自定查询文档。
+
+## 从debian仓库下载调试符号
+
+由于base镜像中没有包含调试符号，如果需要调试应用的系统依赖库，需要从base对应的debian仓库手动下载调试符号包。具体步骤如下：
+
+1. 使用以下命令之一进入容器命令行环境:
+   ```bash
+   ll-builder run --bash
+   # 或
+   ll-cli run $appid --bash
+   ```
+
+2. 查看base镜像使用的仓库地址:
+   ```bash
+   cat /etc/apt/sources.list
+   ```
+
+3. 在宿主机浏览器中打开仓库地址，定位依赖库的deb包所在目录:
+   - 使用命令 `apt-cache show <package-name> | grep Filename` 查看deb包在仓库中的路径
+   - 完整的下载地址为: 仓库地址 + deb包路径
+
+   例如，要下载libgtk-3-0的调试符号包:
+   ```bash
+   apt-cache show libgtk-3-0 | grep Filename
+   # 输出: pool/main/g/gtk+3.0/libgtk-3-0_3.24.41-1deepin3_amd64.deb
+   # 完整目录: <repo-url>/pool/main/g/gtk+3.0/
+   ```
+
+4. 在该目录下寻找对应的调试符号包，通常有两种命名格式:
+   - `<package-name>-dbgsym.deb`
+   - `<package-name>-dbg.deb`
+
+5. 下载并解压调试符号包:
+   ```bash
+   dpkg-deb -R <package-name>-dbgsym.deb /tmp/<package-name>
+   ```
+
+6. 配置调试器查找调试符号:
+   在上面的场景设置debug-file-directory时，追加解压的目录，用冒号分隔:
+   ```
+   ${workspaceFolder}/linglong/output/develop/files/lib/debug:/tmp/<package-name>/usr/lib/debug
+   ```
+
+这样调试器就能在解压的目录中找到系统依赖库的调试符号了。

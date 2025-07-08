@@ -6,24 +6,32 @@
 
 #include "linglong/cli/cli.h"
 
+#include "configure.h"
 #include "linglong/api/dbus/v1/dbus_peer.h"
 #include "linglong/api/types/v1/InteractionReply.hpp"
 #include "linglong/api/types/v1/InteractionRequest.hpp"
+#include "linglong/api/types/v1/LinglongAPIV1.hpp"
+#include "linglong/api/types/v1/PackageInfoDisplay.hpp"
+#include "linglong/api/types/v1/PackageInfoV2.hpp"
 #include "linglong/api/types/v1/PackageManager1InstallParameters.hpp"
 #include "linglong/api/types/v1/PackageManager1JobInfo.hpp"
 #include "linglong/api/types/v1/PackageManager1Package.hpp"
 #include "linglong/api/types/v1/PackageManager1PackageTaskResult.hpp"
+#include "linglong/api/types/v1/PackageManager1PruneResult.hpp"
 #include "linglong/api/types/v1/PackageManager1SearchParameters.hpp"
 #include "linglong/api/types/v1/PackageManager1SearchResult.hpp"
 #include "linglong/api/types/v1/PackageManager1UninstallParameters.hpp"
+#include "linglong/api/types/v1/RepositoryCacheLayersItem.hpp"
 #include "linglong/api/types/v1/State.hpp"
 #include "linglong/api/types/v1/SubState.hpp"
 #include "linglong/api/types/v1/UpgradeListResult.hpp"
 #include "linglong/cli/printer.h"
+#include "linglong/oci-cfg-generators/container_cfg_builder.h"
 #include "linglong/package/layer_file.h"
+#include "linglong/package/reference.h"
 #include "linglong/repo/config.h"
 #include "linglong/runtime/container_builder.h"
-#include "linglong/utils/configure.h"
+#include "linglong/runtime/run_context.h"
 #include "linglong/utils/error/error.h"
 #include "linglong/utils/finally/finally.h"
 #include "linglong/utils/gettext.h"
@@ -40,12 +48,18 @@
 #include <QEventLoop>
 #include <QFileInfo>
 
+#include <algorithm>
+#include <cassert>
 #include <charconv>
+#include <cstdint>
 #include <cstdlib>
 #include <filesystem>
 #include <iostream>
+#include <optional>
 #include <system_error>
 #include <thread>
+#include <utility>
+#include <vector>
 
 #include <fcntl.h>
 #include <sys/mman.h>
@@ -54,7 +68,7 @@
 using namespace linglong::utils::error;
 
 static const std::string permissionNotifyMsg =
-  _("Permission deny, please check whether you are running as root.");
+  _("Permission denied, please check whether you are running as root.");
 
 namespace {
 
@@ -236,8 +250,6 @@ void Cli::onTaskPropertiesChanged(QString interface,                            
                                   QVariantMap changed_properties,                      // NOLINT
                                   [[maybe_unused]] QStringList invalidated_properties) // NOLINT
 {
-    LINGLONG_TRACE("update task properties")
-
     if (interface != task->interface()) {
         return;
     }
@@ -291,6 +303,17 @@ void Cli::onTaskPropertiesChanged(QString interface,                            
             lastMessage = value.toString();
             continue;
         }
+
+        if (key == "Code") {
+            bool ok{ false };
+            auto val = value.toInt(&ok);
+            if (!ok) {
+                qCritical() << "dbus ipc error, Code couldn't convert to int";
+                continue;
+            }
+
+            lastErrorCode = static_cast<utils::error::ErrorCode>(val);
+        }
     }
 
     printProgress();
@@ -315,10 +338,10 @@ void Cli::interaction(QDBusObjectPath object_path, int messageID, QVariantMap ad
 
     switch (messageType) {
     case api::types::v1::InteractionMessageType::Upgrade: {
-        auto tips = QString("The lower version %1 is currently installed. Do you "
-                            "want to continue installing the latest version %2?")
-                      .arg(QString::fromStdString(msg->localRef))
-                      .arg(QString::fromStdString(msg->remoteRef));
+        auto tips =
+          QString("The lower version %1 is currently installed. Do you "
+                  "want to continue installing the latest version %2?")
+            .arg(QString::fromStdString(msg->localRef), QString::fromStdString(msg->remoteRef));
         req.body = tips.toStdString();
     } break;
     case api::types::v1::InteractionMessageType::Downgrade:
@@ -373,8 +396,12 @@ void Cli::onTaskAdded([[maybe_unused]] QDBusObjectPath object_path)
     qDebug() << "task added" << object_path.path();
 }
 
-void Cli::onTaskRemoved(
-  QDBusObjectPath object_path, int state, int subState, QString message, double percentage)
+void Cli::onTaskRemoved(QDBusObjectPath object_path,
+                        int state,
+                        int subState,
+                        QString message,
+                        double percentage,
+                        int code)
 {
     if (object_path.path() != taskObjectPath) {
         return;
@@ -395,6 +422,7 @@ void Cli::onTaskRemoved(
     this->lastSubState = static_cast<api::types::v1::SubState>(subState);
     this->lastMessage = std::move(message);
     this->lastPercentage = percentage;
+    this->lastErrorCode = static_cast<utils::error::ErrorCode>(code);
 
     if (this->lastSubState == api::types::v1::SubState::AllDone) {
         this->printProgress();
@@ -408,9 +436,51 @@ void Cli::onTaskRemoved(
 
 void Cli::printProgress() noexcept
 {
-    LINGLONG_TRACE("print progress")
     if (this->lastState == api::types::v1::State::Unknown) {
         qInfo() << "task is invalid";
+        return;
+    }
+
+    if (this->lastState == api::types::v1::State::Failed) {
+        switch (this->lastErrorCode) {
+        case utils::error::ErrorCode::AppInstallModuleRequireAppFirst:
+            this->printer.printMessage(_("To install the module, one must first install the app."));
+            break;
+        case utils::error::ErrorCode::AppInstallModuleAlreadyExists:
+            this->printer.printMessage(_("Module is already installed."));
+            break;
+        case utils::error::ErrorCode::AppInstallFailed:
+            this->printer.printMessage(_("Install failed"));
+            break;
+        case utils::error::ErrorCode::AppInstallModuleNotFound:
+            this->printer.printMessage(_("The module could not be found remotely."));
+            break;
+        case utils::error::ErrorCode::AppUninstallFailed:
+            this->printer.printMessage(_("Uninstall failed"));
+            break;
+        case utils::error::ErrorCode::AppUpgradeFailed:
+            this->printer.printMessage(_("Upgrade failed"));
+            break;
+        case utils::error::ErrorCode::AppUpgradeNotFound:
+            this->printer.printMessage(_("Application is not installed."));
+            break;
+        case utils::error::ErrorCode::AppUpgradeLatestInstalled:
+            this->printer.printMessage(_("Latest version is already installed."));
+            break;
+        default:
+            this->printer.printTaskState(this->lastPercentage,
+                                         this->lastMessage,
+                                         this->lastState,
+                                         this->lastSubState);
+            return;
+        }
+
+        if (options.verbose) {
+            this->printer.printTaskState(this->lastPercentage,
+                                         this->lastMessage,
+                                         this->lastState,
+                                         this->lastSubState);
+        }
         return;
     }
 
@@ -450,7 +520,7 @@ Cli::Cli(Printer &printer,
                       pkgMan.interface(),
                       "TaskRemoved",
                       this,
-                      SLOT(onTaskRemoved(QDBusObjectPath, int, int, QString, double)))) {
+                      SLOT(onTaskRemoved(QDBusObjectPath, int, int, QString, double, int)))) {
         qFatal("couldn't connect to package manager signal 'TaskRemoved'");
     }
 }
@@ -458,8 +528,12 @@ Cli::Cli(Printer &printer,
 int Cli::run([[maybe_unused]] CLI::App *subcommand)
 {
     LINGLONG_TRACE("command run");
+
+    int64_t uid = getuid();
+    int64_t gid = getgid();
+
     // NOTE: ll-box is not support running as root for now.
-    if (getuid() == 0) {
+    if (uid == 0) {
         qInfo() << "'ll-cli run' currently does not support running as root.";
         return -1;
     }
@@ -504,105 +578,22 @@ int Cli::run([[maybe_unused]] CLI::App *subcommand)
         this->printer.printErr(curAppRef.error());
         return -1;
     }
-    auto appLayerDir = this->repository.getMergedModuleDir(*curAppRef);
-    if (!appLayerDir) {
-        this->printer.printErr(appLayerDir.error());
-        return -1;
+
+    runtime::RunContext runContext(this->repository);
+    auto res = runContext.resolve(*curAppRef);
+    if (!res) {
+        this->printer.printErr(res.error());
     }
 
-    // Note: we should use the info.json which from states.json instead of layer dir
-    const auto &appLayerItem = this->repository.getLayerItem(*curAppRef);
+    const auto &appLayerItem = runContext.getCachedAppItem();
     if (!appLayerItem) {
-        this->printer.printErr(appLayerItem.error());
         return -1;
     }
     const auto &info = appLayerItem->info;
 
-    const auto &appDataDir = utils::xdg::appDataDir(info.id);
-    if (!appDataDir) {
-        this->printer.printErr(appDataDir.error());
-        return -1;
-    }
-
     auto ret = RequestDirectories(info);
     if (!ret) {
         qWarning() << ret.error().message();
-    }
-
-    std::optional<std::string> runtimeLayerRef;
-    std::optional<package::LayerDir> runtimeLayerDir;
-    if (info.runtime) {
-        auto runtimeFuzzyRef =
-          package::FuzzyReference::parse(QString::fromStdString(info.runtime.value()));
-        if (!runtimeFuzzyRef) {
-            this->printer.printErr(runtimeFuzzyRef.error());
-            return -1;
-        }
-
-        auto runtimeRefRet = this->repository.clearReference(*runtimeFuzzyRef,
-                                                             {
-                                                               .forceRemote = false,
-                                                               .fallbackToRemote = false,
-                                                             });
-        if (!runtimeRefRet) {
-            this->printer.printErr(runtimeRefRet.error());
-            return -1;
-        }
-        const auto &runtimeRef = *runtimeRefRet;
-
-        if (!info.uuid.has_value()) {
-            auto runtimeLayerDirRet = this->repository.getMergedModuleDir(runtimeRef);
-            if (!runtimeLayerDirRet) {
-                this->printer.printErr(runtimeLayerDirRet.error());
-                return -1;
-            }
-            runtimeLayerDir = std::move(runtimeLayerDirRet).value();
-        } else {
-            auto runtimeLayerDirRet =
-              this->repository.getLayerDir(*runtimeRefRet, "binary", info.uuid);
-            if (!runtimeLayerDirRet) {
-                this->printer.printErr(runtimeLayerDirRet.error());
-                return -1;
-            }
-            runtimeLayerRef = runtimeRefRet->toString().toStdString();
-            runtimeLayerDir = std::move(runtimeLayerDirRet).value();
-        }
-    }
-
-    auto baseFuzzyRef = package::FuzzyReference::parse(QString::fromStdString(info.base));
-    if (!baseFuzzyRef) {
-        this->printer.printErr(baseFuzzyRef.error());
-        return -1;
-    }
-
-    auto baseRef = this->repository.clearReference(*baseFuzzyRef,
-                                                   {
-                                                     .forceRemote = false,
-                                                     .fallbackToRemote = false,
-                                                   });
-    if (!baseRef) {
-        this->printer.printErr(LINGLONG_ERRV(baseRef));
-        return -1;
-    }
-
-    utils::error::Result<package::LayerDir> baseLayerDir;
-    if (!info.uuid.has_value()) {
-        qDebug() << "getMergedModuleDir base";
-        baseLayerDir = this->repository.getMergedModuleDir(*baseRef);
-    } else {
-        qDebug() << "getLayerDir base" << info.uuid.value().c_str();
-        baseLayerDir = this->repository.getLayerDir(*baseRef, "binary", info.uuid);
-    }
-
-    if (!baseLayerDir) {
-        this->printer.printErr(LINGLONG_ERRV(baseLayerDir));
-        return -1;
-    }
-
-    auto appCache = this->ensureCache(*curAppRef, *appLayerItem);
-    if (!appCache) {
-        this->printer.printErr(LINGLONG_ERRV(appCache));
-        return -1;
     }
 
     auto commands = options.commands;
@@ -611,23 +602,12 @@ int Cli::run([[maybe_unused]] CLI::App *subcommand)
     }
     commands = filePathMapping(commands);
 
-    auto newContainerID = runtime::genContainerID(*curAppRef);
-    auto bundle = runtime::getBundleDir(newContainerID);
-    if (!bundle) {
-        this->printer.printErr(LINGLONG_ERRV(bundle));
-        return -1;
-    }
-
     // this lambda will dump reference of containerID, app, base and runtime to
     // /run/linglong/getuid()/getpid() to store these needed infomation
-    auto dumpContainerInfo = [app = curAppRef->toString().toStdString(),
-                              base = baseRef->toString().toStdString(),
-                              &newContainerID,
-                              &runtimeLayerRef,
-                              this]() -> bool {
+    auto dumpContainerInfo = [uid, &runContext, this]() -> bool {
         LINGLONG_TRACE("dump info")
         std::error_code ec;
-        auto pidFile = std::filesystem::path{ "/run/linglong" } / std::to_string(::getuid())
+        auto pidFile = std::filesystem::path{ "/run/linglong" } / std::to_string(uid)
           / std::to_string(::getpid());
         if (!std::filesystem::exists(pidFile, ec)) {
             if (ec) {
@@ -646,12 +626,7 @@ int Cli::run([[maybe_unused]] CLI::App *subcommand)
             this->printer.printErr(LINGLONG_ERRV(msg));
             return false;
         }
-        stream << nlohmann::json(linglong::api::types::v1::ContainerProcessStateInfo{
-          .app = app,
-          .base = base,
-          .containerID = newContainerID,
-          .runtime = runtimeLayerRef,
-        });
+        stream << nlohmann::json(runContext.stateInfo());
         stream.close();
 
         return true;
@@ -687,13 +662,15 @@ int Cli::run([[maybe_unused]] CLI::App *subcommand)
         execArgs.prepend("exec");
 
         // 在原始args前面添加bash --login -c，这样可以使用/etc/profile配置的环境变量
-        commands = std::vector<std::string>{
-            "/bin/bash", "--login", "-e", "-c", execArgs.join(' ').toStdString(), "; wait"
-        };
+        commands = std::vector<std::string>{ "/bin/bash",
+                                             "--login",
+                                             "-e",
+                                             "-c",
+                                             execArgs.join(' ').toStdString() };
 
         auto opt = ocppi::runtime::ExecOption{
-            .uid = ::getuid(),
-            .gid = ::getgid(),
+            .uid = uid,
+            .gid = gid,
         };
 
         auto result = this->ociCLI.exec(container.id,
@@ -709,73 +686,56 @@ int Cli::run([[maybe_unused]] CLI::App *subcommand)
         return 0;
     }
 
-    std::vector<ocppi::runtime::config::types::Mount> applicationMounts{};
-    auto bindMount =
-      [&applicationMounts](const api::types::v1::ApplicationConfigurationPermissionsBind &bind) {
-          applicationMounts.push_back(ocppi::runtime::config::types::Mount{
-            .destination = bind.destination,
-            .gidMappings = {},
-            .options = { { "rbind" } },
-            .source = bind.source,
-            .type = "bind",
-            .uidMappings = {},
-          });
-      };
-
-    auto bindInnerMount =
-      [&applicationMounts](
-        const api::types::v1::ApplicationConfigurationPermissionsInnerBind &bind) {
-          applicationMounts.push_back(ocppi::runtime::config::types::Mount{
-            .destination = bind.destination,
-            .gidMappings = {},
-            .options = { { "rbind" } },
-            .source = "rootfs" + bind.source,
-            .type = "bind",
-            .uidMappings = {},
-          });
-      };
-
-    if (info.permissions) {
-        const auto &perm = info.permissions;
-        if (perm->binds) {
-            const auto &binds = perm->binds;
-            std::for_each(binds->cbegin(), binds->cend(), bindMount);
-        }
-
-        if (perm->innerBinds) {
-            const auto &innerBinds = perm->innerBinds;
-            const auto &hostSourceDir =
-              std::filesystem::path{ appLayerDir->absolutePath().toStdString() };
-            std::for_each(innerBinds->cbegin(), innerBinds->cend(), bindInnerMount);
-        }
+    auto *homeEnv = ::getenv("HOME");
+    if (homeEnv == nullptr) {
+        qCritical() << "Couldn't get HOME env.";
+        return -1;
     }
 
-    applicationMounts.push_back(ocppi::runtime::config::types::Mount{
-      .destination = "/run/linglong/cache",
-      .options = nlohmann::json::array({ "rbind", "ro" }),
-      .source = *appCache,
-      .type = "bind",
-    });
-
+    linglong::generator::ContainerCfgBuilder cfgBuilder;
+    res = runContext.fillContextCfg(cfgBuilder);
+    if (!res) {
+        this->printer.printErr(res.error());
+        return -1;
+    }
+    cfgBuilder.setAppId(curAppRef->id.toStdString())
+      .addUIdMapping(uid, uid, 1)
+      .addGIdMapping(gid, gid, 1)
+      .bindDefault()
+      .bindDevNode()
+      .bindCgroup()
+      .bindRun()
+      .bindUserGroup()
+      .bindMedia()
+      .bindHostRoot()
+      .bindHostStatics()
+      .bindHome(homeEnv)
+      .enablePrivateDir()
+      .mapPrivate(std::string{ homeEnv } + "/.ssh", true)
+      .mapPrivate(std::string{ homeEnv } + "/.gnupg", true)
+      .bindIPC()
+      .forwardDefaultEnv()
+      .enableSelfAdjustingMount();
 #ifdef LINGLONG_FONT_CACHE_GENERATOR
-    applicationMounts.push_back(ocppi::runtime::config::types::Mount{
-      .destination = "/var/cache/fontconfig",
-      .options = nlohmann::json::array({ "rbind", "ro" }),
-      .source = *appCache + "/fontconfig",
-      .type = "bind",
-    });
+    cfgBuilder.enableFontCache();
 #endif
-    auto container = this->containerBuilder.create({
-      .appID = std::move(curAppRef->id),
-      .containerID = QString::fromStdString(newContainerID),
-      .runtimeDir = std::move(runtimeLayerDir),
-      .baseDir = std::move(baseLayerDir).value(),
-      .appDir = std::move(appLayerDir).value(),
-      .bundle = std::move(bundle).value(),
-      .patches = {},
-      .mounts = std::move(applicationMounts),
-      .masks = {},
-    });
+
+    auto appCache = this->ensureCache(runContext, cfgBuilder);
+    if (!appCache) {
+        this->printer.printErr(LINGLONG_ERRV(appCache));
+        return -1;
+    }
+    cfgBuilder.setAppCache(*appCache).enableLDCache();
+
+    if (!cfgBuilder.build()) {
+        auto err = cfgBuilder.getError();
+        qCritical() << "build cfg error: " << QString::fromStdString(err.reason);
+        return -1;
+    }
+
+    auto container =
+      this->containerBuilder.create(cfgBuilder,
+                                    QString::fromStdString(runContext.getContainerId()));
 
     if (!container) {
         this->printer.printErr(container.error());
@@ -914,8 +874,6 @@ Cli::getCurrentContainers() const noexcept
 
 int Cli::ps([[maybe_unused]] CLI::App *subcommand)
 {
-    LINGLONG_TRACE("command ps");
-
     auto myContainers = getCurrentContainers();
     if (!myContainers) {
         this->printer.printErr(myContainers.error());
@@ -1100,6 +1058,7 @@ int Cli::install([[maybe_unused]] CLI::App *subcommand)
                                                                      .skipInteraction = false } };
     params.options.force = options.forceOpt;
     params.options.skipInteraction = options.confirmOpt;
+    params.repo = options.repo;
 
     auto app = QString::fromStdString(options.appid);
     QFileInfo info(app);
@@ -1141,7 +1100,7 @@ int Cli::install([[maybe_unused]] CLI::App *subcommand)
         params.package.channel = fuzzyRef->channel->toStdString();
     }
     if (fuzzyRef->version) {
-        params.package.version = fuzzyRef->version->toString().toStdString();
+        params.package.version = fuzzyRef->version->toStdString();
     }
 
     if (!options.module.empty()) {
@@ -1178,8 +1137,49 @@ int Cli::install([[maybe_unused]] CLI::App *subcommand)
         std::abort();
     }
 
-    if (result->code != 0) {
-        this->printer.printReply({ .code = result->code, .message = result->message });
+    auto resultCode = static_cast<utils::error::ErrorCode>(result->code);
+
+    if (resultCode != utils::error::ErrorCode::Success) {
+        switch (resultCode) {
+
+        case utils::error::ErrorCode::NetworkError:
+            this->printer.printMessage(_("Network connection failed. Please:"
+                                         "\n1. Check your internet connection"
+                                         "\n2. Verify network proxy settings if used"));
+            break;
+        case utils::error::ErrorCode::AppInstallAlreadyInstalled:
+            this->printer.printMessage(
+              QString{ _("Application already installed, If you want to replace it, try using "
+                         "'ll-cli install %1 --force'") }
+                .arg(params.package.id.c_str()));
+            break;
+        case utils::error::ErrorCode::AppInstallNotFoundFromRemote:
+            this->printer.printMessage(
+              QString{ _("Application %1 is not found in remote repo.") }.arg(
+                params.package.id.c_str()));
+            break;
+        case utils::error::ErrorCode::AppInstallModuleNoVersion:
+            this->printer.printMessage(_("Cannot specify a version when installing a module."));
+            break;
+        case utils::error::ErrorCode::AppInstallNeedDowngrade:
+            this->printer.printMessage(
+              QString{ _("The latest version has been installed. If you want to "
+                         "replace it, try using 'll-cli install %1/version --force'") }
+                .arg(params.package.id.c_str()));
+            break;
+        case utils::error::ErrorCode::Unknown:
+        case utils::error::ErrorCode::AppInstallFailed:
+            this->printer.printMessage(_("Install failed"));
+            break;
+        default:
+            this->printer.printReply({ .code = result->code, .message = result->message });
+            return -1;
+        }
+
+        if (options.verbose) {
+            this->printer.printReply({ .code = result->code, .message = result->message });
+        }
+
         return -1;
     }
 
@@ -1229,19 +1229,39 @@ int Cli::upgrade([[maybe_unused]] CLI::App *subcommand)
             this->printer.printErr(fuzzyRef.error());
             return -1;
         }
+
+        auto localRefRet = this->repository.clearReference(*fuzzyRef,
+                                                           {
+                                                             .forceRemote = false,
+                                                             .fallbackToRemote = false,
+                                                           });
+        if (!localRefRet) {
+            this->printer.printErr(localRefRet.error());
+            return -1;
+        }
+
+        auto layerItemRet = this->repository.getLayerItem(*localRefRet);
+        if (!layerItemRet) {
+            this->printer.printErr(layerItemRet.error());
+            return -1;
+        }
+        if (layerItemRet->info.kind != "app") {
+            this->printer.printErr(
+              LINGLONG_ERRV(std::string{ "package " + options.appid + " is not an app" }.c_str()));
+            return -1;
+        }
         fuzzyRefs.emplace_back(std::move(*fuzzyRef));
     } else {
         // Note: upgrade all apps for now.
-        auto list = this->listUpgradable("app");
+        auto list = this->listUpgradable();
         if (!list) {
             this->printer.printErr(list.error());
             return -1;
         }
         for (const auto &item : *list) {
-            auto fuzzyRef =
-              package::FuzzyReference::parse(QString("%1/%2")
-                                               .arg(QString::fromStdString(item.id))
-                                               .arg(QString::fromStdString(item.oldVersion)));
+            auto fuzzyRef = package::FuzzyReference::parse(
+              QString("%1/%2").arg(QString::fromStdString(item.id),
+                                   QString::fromStdString(item.oldVersion)));
             if (!fuzzyRef) {
                 this->printer.printErr(fuzzyRef.error());
                 return -1;
@@ -1263,7 +1283,7 @@ int Cli::upgrade([[maybe_unused]] CLI::App *subcommand)
             package.channel = fuzzyRef.channel->toStdString();
         }
         if (fuzzyRef.version) {
-            package.version = fuzzyRef.version->toString().toStdString();
+            package.version = fuzzyRef.version->toStdString();
         }
         params.packages.emplace_back(std::move(package));
     }
@@ -1334,11 +1354,40 @@ int Cli::search([[maybe_unused]] CLI::App *subcommand)
 
     auto params = api::types::v1::PackageManager1SearchParameters{
         .id = options.appid,
+        .repos = {},
     };
 
-    auto pendingReply = this->pkgMan.Search(utils::serialize::toQVariantMap(params));
-    pendingReply.waitForFinished();
+    auto repoConfig = this->repository.getOrderedConfig();
 
+    if (options.repo) {
+        // 检查repo是否存在
+        auto it = std::find_if(repoConfig.repos.begin(),
+                               repoConfig.repos.end(),
+                               [this](const api::types::v1::Repo &repo) {
+                                   return repo.alias.value_or(repo.name) == options.repo.value();
+                               });
+        if (it == repoConfig.repos.end()) {
+            this->printer.printErr(
+              LINGLONG_ERRV(QString{ "repo %1 not found" }.arg(options.repo.value().c_str())));
+            return -1;
+        }
+        params.repos.emplace_back(options.repo.value());
+    } else {
+        // 如果没有指定repo，则搜索优先级最高的所有仓库, 仓库的优先级可以相同
+        assert(!repoConfig.repos.empty());
+        for (const auto &repo : repoConfig.repos) {
+            if (repo.priority < repoConfig.repos[0].priority) {
+                break;
+            }
+            params.repos.emplace_back(repo.alias.value_or(repo.name));
+        }
+    }
+
+    std::optional<QString> pendingJobID;
+
+    auto pendingReply = this->pkgMan.Search(utils::serialize::toQVariantMap(params));
+
+    pendingReply.waitForFinished();
     if (pendingReply.isError()) {
         if (pendingReply.error().type() == QDBusError::AccessDenied) {
             this->notifier->notify(
@@ -1358,65 +1407,84 @@ int Cli::search([[maybe_unused]] CLI::App *subcommand)
         return -1;
     }
 
-    if (!result->id) {
-        this->printer.printErr(
-          LINGLONG_ERRV("\n" + QString::fromStdString(result->message), result->code));
-        return -1;
-    }
+    pendingJobID = QString::fromStdString(result->id);
 
     QEventLoop loop;
+    connect(
+      &this->pkgMan,
+      &api::dbus::v1::PackageManager::SearchFinished,
+      [&pendingJobID, this, &loop](const QString &jobID, const QVariantMap &data) {
+          LINGLONG_TRACE("process search result");
+          // Note: once an error occurs, remember to return after exiting the loop.
+          if (!pendingJobID || *pendingJobID != jobID) {
+              return;
+          }
+          auto result =
+            utils::serialize::fromQVariantMap<api::types::v1::PackageManager1SearchResult>(data);
+          if (!result) {
+              this->printer.printErr(result.error());
+              loop.exit(-1);
+              return;
+          }
+          // Note: should check return code of PackageManager1SearchResult
+          auto resultCode = static_cast<utils::error::ErrorCode>(result->code);
+          if (resultCode != utils::error::ErrorCode::Success) {
+              if (resultCode == utils::error::ErrorCode::Failed) {
+                  this->printer.printErr(
+                    LINGLONG_ERRV("\n" + QString::fromStdString(result->message), result->code));
+                  loop.exit(result->code);
+                  return;
+              }
 
-    connect(&this->pkgMan,
-            &api::dbus::v1::PackageManager::SearchFinished,
-            [&](const QString &jobID, const QVariantMap &data) {
-                // Note: once an error occurs, remember to return after exiting the loop.
-                if (result->id->c_str() != jobID) {
-                    return;
-                }
-                auto result =
-                  utils::serialize::fromQVariantMap<api::types::v1::PackageManager1SearchResult>(
-                    data);
-                if (!result) {
-                    this->printer.printErr(result.error());
-                    loop.exit(-1);
-                    return;
-                }
-                // Note: should check return code of PackageManager1SearchResult
-                if (result->code != 0) {
-                    this->printer.printErr(
-                      LINGLONG_ERRV("\n" + QString::fromStdString(result->message), result->code));
-                    loop.exit(result->code);
-                    return;
-                }
+              if (resultCode == utils::error::ErrorCode::NetworkError) {
+                  this->printer.printMessage(_("Network connection failed. Please:"
+                                               "\n1. Check your internet connection"
+                                               "\n2. Verify network proxy settings if used"));
+              }
 
-                if (!result->packages) {
-                    this->printer.printPackages({});
-                    loop.exit(0);
-                    return;
-                }
+              if (options.verbose) {
+                  this->printer.printErr(
+                    LINGLONG_ERRV("\n" + QString::fromStdString(result->message), result->code));
+              }
 
-                auto pkgs = std::move(result->packages).value();
-                if (!options.showDevel) {
-                    auto it = std::remove_if(pkgs.begin(),
-                                             pkgs.end(),
-                                             [](const api::types::v1::PackageInfoV2 &info) {
-                                                 return info.packageInfoV2Module == "develop";
-                                             });
-                    pkgs.erase(it, pkgs.end());
-                }
+              loop.exit(result->code);
+              return;
+          }
 
-                if (!options.type.empty()) {
-                    filterPackageInfosFromType(pkgs, options.type);
-                }
+          if (!result->packages) {
+              this->printer.printPackages({});
+              loop.exit(0);
+              return;
+          }
 
-                // default only the latest version is displayed
-                if (!options.showAllVersion) {
-                    filterPackageInfosFromVersion(pkgs);
-                }
+          auto allPackages = std::move(result->packages).value();
+          if (!options.showDevel) {
+              std::for_each(allPackages.begin(),
+                            allPackages.end(),
+                            [](decltype(allPackages)::reference pkgs) {
+                                auto &vec = pkgs.second;
 
-                this->printer.printPackages(pkgs);
-                loop.exit(0);
-            });
+                                auto it =
+                                  std::remove_if(vec.begin(),
+                                                 vec.end(),
+                                                 [](const api::types::v1::PackageInfoV2 &pkg) {
+                                                     return pkg.packageInfoV2Module == "develop";
+                                                 });
+                                vec.erase(it, vec.end());
+                            });
+          }
+
+          if (!options.type.empty()) {
+              filterPackageInfosByType(allPackages, options.type);
+          }
+
+          // default only the latest version is displayed
+          if (!options.showAllVersion) {
+              filterPackageInfosByVersion(allPackages);
+          }
+          this->printer.printSearchResult(allPackages);
+          loop.exit(0);
+      });
     return loop.exec();
 }
 
@@ -1439,14 +1507,22 @@ int Cli::prune([[maybe_unused]] CLI::App *subcommand)
       &this->pkgMan,
       &api::dbus::v1::PackageManager::PruneFinished,
       [this, &loop, &jobIDReply](const QString &jobID, const QVariantMap &data) {
+          LINGLONG_TRACE("process prune result");
           if (jobIDReply != jobID) {
               return;
           }
           auto ret =
-            utils::serialize::fromQVariantMap<api::types::v1::PackageManager1SearchResult>(data);
+            utils::serialize::fromQVariantMap<api::types::v1::PackageManager1PruneResult>(data);
           if (!ret) {
               this->printer.printErr(ret.error());
               loop.exit(-1);
+              return;
+          }
+
+          if (!ret->packages) {
+              this->printer.printErr(LINGLONG_ERRV("No packages to prune."));
+              loop.exit(0);
+              return;
           }
 
           this->printer.printPruneResult(*ret->packages);
@@ -1475,13 +1551,7 @@ int Cli::prune([[maybe_unused]] CLI::App *subcommand)
         return -1;
     }
 
-    if (!result->id) {
-        this->printer.printErr(
-          LINGLONG_ERRV("\n" + QString::fromStdString(result->message), result->code));
-        return -1;
-    }
-
-    jobIDReply = QString::fromStdString(result->id.value());
+    jobIDReply = QString::fromStdString(result->id);
 
     return loop.exec();
 }
@@ -1511,6 +1581,15 @@ int Cli::uninstall([[maybe_unused]] CLI::App *subcommand)
                                                  .fallbackToRemote = false,
                                                });
     if (!ref) {
+        const auto errCode = static_cast<utils::error::ErrorCode>(ref.error().code());
+        if (errCode == utils::error::ErrorCode::AppNotFoundFromLocal) {
+            this->printer.printMessage(_("Application is not installed."));
+
+            if (options.verbose) {
+                this->printer.printErr(ref.error());
+            }
+            return -1;
+        }
         this->printer.printErr(ref.error());
         return -1;
     }
@@ -1539,7 +1618,7 @@ int Cli::uninstall([[maybe_unused]] CLI::App *subcommand)
         params.package.channel = fuzzyRef->channel->toStdString();
     }
     if (fuzzyRef->version) {
-        params.package.version = fuzzyRef->version->toString().toStdString();
+        params.package.version = fuzzyRef->version->toStdString();
     }
 
     auto pendingReply = this->pkgMan.Uninstall(utils::serialize::toQVariantMap(params));
@@ -1565,13 +1644,30 @@ int Cli::uninstall([[maybe_unused]] CLI::App *subcommand)
         return -1;
     }
 
-    if (result->code != 0) {
+    auto resultCode = static_cast<utils::error::ErrorCode>(result->code);
+    if (resultCode != utils::error::ErrorCode::Success) {
         auto err = LINGLONG_ERRV(QString::fromStdString(result->message), result->code);
         if (result->type == "notification") {
             this->notifier->notify(
               api::types::v1::InteractionRequest{ .appName = "ll-cli",
                                                   .summary = result->message });
-        } else {
+            return -1;
+        }
+
+        switch (resultCode) {
+        case utils::error::ErrorCode::AppUninstallNotFoundFromLocal:
+            this->printer.printMessage(_("Application is not installed."));
+            break;
+        case utils::error::ErrorCode::AppUninstallFailed:
+        case utils::error::ErrorCode::Unknown:
+            this->printer.printMessage(_("Uninstall failed"));
+            break;
+        default:
+            this->printer.printErr(err);
+            return -1;
+        }
+
+        if (options.verbose) {
             this->printer.printErr(err);
         }
 
@@ -1606,24 +1702,32 @@ int Cli::uninstall([[maybe_unused]] CLI::App *subcommand)
 }
 
 int Cli::list([[maybe_unused]] CLI::App *subcommand)
-{
-    LINGLONG_TRACE("command list");
 
+{
     if (!options.showUpgradeList) {
-        auto pkgs = this->repository.listLocal();
-        if (!pkgs) {
-            this->printer.printErr(pkgs.error());
+        auto items = this->repository.listLayerItem();
+        if (!items) {
+            this->printer.printErr(items.error());
             return -1;
         }
-
-        if (!options.type.empty()) {
-            filterPackageInfosFromType(*pkgs, options.type);
+        std::vector<api::types::v1::PackageInfoDisplay> list;
+        for (const auto &item : *items) {
+            nlohmann::json json = item.info;
+            auto m = json.get<api::types::v1::PackageInfoDisplay>();
+            auto t = this->repository.getLayerCreateTime(item);
+            if (t.has_value()) {
+                m.installTime = *t;
+            }
+            list.push_back(std::move(m));
         }
-        this->printer.printPackages(*pkgs);
+        if (!options.type.empty()) {
+            filterPackageInfosByType(list, options.type);
+        }
+        this->printer.printPackages(list);
         return 0;
     }
 
-    auto upgradeList = this->listUpgradable(options.type);
+    auto upgradeList = this->listUpgradable();
     if (!upgradeList) {
         this->printer.printErr(upgradeList.error());
         return -1;
@@ -1642,9 +1746,11 @@ Cli::listUpgradable(const std::string &type)
         return LINGLONG_ERR(pkgs);
     }
 
-    if (!type.empty()) {
-        filterPackageInfosFromType(*pkgs, type);
-    }
+    auto localPkgs = std::map<std::string, std::vector<api::types::v1::PackageInfoV2>>{
+        { "all", std::move(pkgs).value() }
+    };
+
+    filterPackageInfosByType(localPkgs, type);
 
     std::vector<api::types::v1::UpgradeListResult> upgradeList;
     auto fullFuzzyRef = package::FuzzyReference::parse(QString::fromStdString("."));
@@ -1652,80 +1758,49 @@ Cli::listUpgradable(const std::string &type)
         return LINGLONG_ERR(fullFuzzyRef);
     }
 
-    auto remotePkgs = this->repository.listRemote(*fullFuzzyRef);
-    if (!remotePkgs) {
-        return LINGLONG_ERR(remotePkgs);
+    auto remoteRepos = this->repository.getHighestPriorityRepos();
+    if (remoteRepos.empty()) {
+        return LINGLONG_ERR("No remote repository found.");
     }
 
-    utils::error::Result<package::Reference> reference = LINGLONG_ERR("reference not exists");
-    for (const auto &pkg : *pkgs) {
-        auto fuzzy = package::FuzzyReference::parse(QString::fromStdString(pkg.id));
+    auto archRet = package::Architecture::currentCPUArchitecture();
+    if (!archRet) {
+        return LINGLONG_ERR(archRet);
+    }
+
+    std::optional<package::Reference> reference;
+    for (const auto &pkg : localPkgs["all"]) {
+        auto fuzzy = package::FuzzyReference::create(pkg.channel.c_str(),
+                                                     pkg.id.c_str(),
+                                                     std::nullopt,
+                                                     *archRet);
         if (!fuzzy) {
             this->printer.printErr(fuzzy.error());
             continue;
         }
 
-        reference = LINGLONG_ERR("reference not exists");
+        reference.reset();
 
-        for (auto record : *remotePkgs) {
-            auto recordStr = nlohmann::json(record).dump();
-            if (fuzzy->channel && fuzzy->channel->toStdString() != record.channel) {
-                continue;
-            }
-            if (fuzzy->id.toStdString() != record.id) {
-                continue;
-            }
-            auto version = package::Version::parse(QString::fromStdString(record.version));
-            if (!version) {
-                qWarning() << "Ignore invalid package record" << recordStr.c_str()
-                           << version.error();
-                continue;
-            }
-            if (record.arch.empty()) {
-                qWarning() << "Ignore invalid package record";
-                continue;
-            }
+        auto newRef = this->repository.latestRemoteReference(*fuzzy);
 
-            auto arch = package::Architecture::parse(record.arch[0]);
-            if (!arch) {
-                qWarning() << "Ignore invalid package record" << recordStr.c_str() << arch.error();
-                continue;
-            }
-            auto channel = QString::fromStdString(record.channel);
-            auto currentRef = package::Reference::create(channel, fuzzy->id, *version, *arch);
-            if (!currentRef) {
-                qWarning() << "Ignore invalid package record" << recordStr.c_str()
-                           << currentRef.error();
-                continue;
-            }
-            if (!reference) {
-                reference = *currentRef;
-                continue;
-            }
-
-            if (reference->version >= currentRef->version) {
-                continue;
-            }
-
-            reference = *currentRef;
-        }
-
-        if (!reference) {
-            qDebug() << "Failed to find the package: "
-                     << QString::fromStdString(fuzzy->id.toStdString())
-                     << ", maybe it is local package, skip it.";
+        if (!newRef) {
+            qDebug() << "Failed to find remote latest reference:" << newRef.error().message();
             continue;
         }
 
-        auto oldVersion = package::Version::parse(QString::fromStdString(pkg.version));
+        auto oldVersion = package::Version::parse(pkg.version.c_str());
         if (!oldVersion) {
-            std::cerr << "failed to parse old version:"
-                      << oldVersion.error().message().toStdString() << std::endl;
+            qDebug() << "failed to parse old version:" << oldVersion.error().message();
+            continue;
         }
 
-        if (reference->version <= *oldVersion) {
-            qDebug() << "The local package" << QString::fromStdString(pkg.id)
-                     << "version is higher than the remote repository version, skip it.";
+        if (newRef->reference.version > *oldVersion) {
+            reference = newRef->reference;
+        }
+
+        if (!reference) {
+            qDebug() << "Failed to find the package: " << fuzzy->id
+                     << ", maybe it is local package, skip it.";
             continue;
         }
 
@@ -1812,11 +1887,10 @@ int Cli::repo(CLI::App *app)
               LINGLONG_ERRV(QString{ "repo " } + alias.c_str() + " already exist."));
             return -1;
         }
-        auto minPriority = linglong::repo::getRepoMinPriority(cfgRef);
         cfgRef.repos.push_back(api::types::v1::Repo{
           .alias = options.repoOptions.repoAlias,
           .name = name,
-          .priority = minPriority - 100,
+          .priority = 0,
           .url = url,
         });
         return this->setRepoConfig(utils::serialize::toQVariantMap(cfgRef));
@@ -1834,14 +1908,25 @@ int Cli::repo(CLI::App *app)
     }
 
     if (argsParseFunc("remove")) {
-        if (cfgRef.defaultRepo == alias) {
-            this->printer.printErr(
-              LINGLONG_ERRV(QString{ "repo " } + alias.c_str()
-                            + "is default repo, please change default repo before removing it."));
+        if (cfgRef.repos.size() == 1) {
+            this->printer.printErr(LINGLONG_ERRV(QString{ "repo " } + alias.c_str()
+                                                 + " is the only repo, please add another repo "
+                                                   "before removing it or update it directly."));
             return -1;
         }
-
         cfgRef.repos.erase(existingRepo);
+
+        if (cfgRef.defaultRepo == alias) {
+            // choose the max priority repo as default repo
+            auto maxPriority = linglong::repo::getRepoMaxPriority(cfgRef);
+            for (auto &repo : cfgRef.repos) {
+                if (repo.priority == maxPriority) {
+                    cfgRef.defaultRepo = repo.alias.value_or(repo.name);
+                    break;
+                }
+            }
+        }
+
         return this->setRepoConfig(utils::serialize::toQVariantMap(cfgRef));
     }
 
@@ -1857,8 +1942,9 @@ int Cli::repo(CLI::App *app)
 
     if (argsParseFunc("set-default")) {
         if (cfgRef.defaultRepo != alias) {
-            auto maxPriority = linglong::repo::getRepoMaxPriority(cfgRef);
             cfgRef.defaultRepo = alias;
+            // set-default is equal to set-priority to the current max priority + 100
+            auto maxPriority = linglong::repo::getRepoMaxPriority(cfgRef);
             for (auto &repo : cfgRef.repos) {
                 if (repo.alias.value_or(repo.name) == alias) {
                     repo.priority = maxPriority + 100;
@@ -1872,15 +1958,6 @@ int Cli::repo(CLI::App *app)
     }
 
     if (argsParseFunc("set-priority")) {
-        auto isExist =
-          std::any_of(cfgRef.repos.begin(), cfgRef.repos.end(), [this](const auto &repo) {
-              return repo.priority == this->options.repoOptions.repoPriority;
-          });
-        if (isExist) {
-            this->printer.printErr(LINGLONG_ERRV(
-              QString("priority %1 already exist.").arg(this->options.repoOptions.repoPriority)));
-            return -1;
-        }
         existingRepo->priority = options.repoOptions.repoPriority;
         return this->setRepoConfig(utils::serialize::toQVariantMap(cfgRef));
     }
@@ -2154,63 +2231,103 @@ Cli::filePathMapping(const std::vector<std::string> &command) const noexcept
     return execArgs;
 }
 
-void Cli::filterPackageInfosFromType(std::vector<api::types::v1::PackageInfoV2> &list,
-                                     const std::string &type) noexcept
+void Cli::filterPackageInfosByType(
+  std::map<std::string, std::vector<api::types::v1::PackageInfoV2>> &list,
+  const std::string &type) noexcept
 {
     // if type is all, do nothing, return app of all packages.
     if (type == "all") {
         return;
     }
 
-    std::vector<api::types::v1::PackageInfoV2> temp;
+    std::map<std::string, std::vector<api::types::v1::PackageInfoV2>> filtered;
 
-    // if type is runtime or app, return app of specific type.
-    for (const auto &info : list) {
-        if (info.kind == type) {
-            temp.push_back(info);
+    for (const auto &[key, packages] : list) {
+        std::vector<api::types::v1::PackageInfoV2> filteredPackages;
+
+        std::copy_if(packages.begin(),
+                     packages.end(),
+                     std::back_inserter(filteredPackages),
+                     [&type](const api::types::v1::PackageInfoV2 &pkg) {
+                         return pkg.kind == type;
+                     });
+
+        if (!filteredPackages.empty()) {
+            filtered.emplace(key, std::move(filteredPackages));
         }
     }
 
-    list.clear();
-    std::move(temp.begin(), temp.end(), std::back_inserter(list));
+    list = std::move(filtered);
 }
 
-utils::error::Result<void>
-Cli::filterPackageInfosFromVersion(std::vector<api::types::v1::PackageInfoV2> &list) noexcept
+void Cli::filterPackageInfosByType(std::vector<api::types::v1::PackageInfoDisplay> &list,
+                                   const std::string &type)
+{
+    if (type == "all") {
+        return;
+    }
+    list.erase(std::remove_if(list.begin(),
+                              list.end(),
+                              [&type](const api::types::v1::PackageInfoDisplay &pkg) {
+                                  return pkg.kind != type;
+                              }),
+               list.end());
+}
+
+utils::error::Result<void> Cli::filterPackageInfosByVersion(
+  std::map<std::string, std::vector<api::types::v1::PackageInfoV2>> &list) noexcept
 {
     LINGLONG_TRACE("filter package infos from version");
 
-    std::unordered_map<std::string, api::types::v1::PackageInfoV2> temp;
+    for (const auto &[pkgRepo, packages] : list) {
+        std::map<std::string, api::types::v1::PackageInfoV2> temp;
+        for (const auto &pkgInfo : packages) {
+            auto key =
+              QString("%1-%2-%3")
+                .arg(pkgRepo.c_str(), pkgInfo.id.c_str(), pkgInfo.packageInfoV2Module.c_str())
+                .toStdString();
 
-    for (const auto &info : list) {
-        auto key = QString("%1-%2")
-                     .arg(QString::fromStdString(info.id))
-                     .arg(QString::fromStdString(info.packageInfoV2Module))
-                     .toStdString();
-        auto it = temp.find(key);
-        if (it == temp.end()) {
-            temp[key] = info;
+            auto it = temp.find(key);
+            if (it == temp.end()) {
+                temp.emplace(key, pkgInfo);
+                continue;
+            }
+
+            auto oldVersion = package::Version::parse(it->second.version.c_str());
+            if (!oldVersion) {
+                qWarning() << "failed to parse old version:" << oldVersion.error().message();
+                continue;
+            }
+
+            auto newVersion = package::Version::parse(pkgInfo.version.c_str());
+            if (!newVersion) {
+                qWarning() << "failed to parse new version:" << newVersion.error().message();
+                continue;
+            }
+
+            if (*oldVersion < *newVersion) {
+                it->second = pkgInfo;
+            }
+        }
+
+        if (temp.empty()) {
             continue;
         }
 
-        auto oldVersion = package::Version::parse(QString::fromStdString(it->second.version));
-        if (!oldVersion) {
-            return LINGLONG_ERR("failed to parse old version", oldVersion.error());
-        }
-        auto newVersion = package::Version::parse(QString::fromStdString(info.version));
-        if (!newVersion) {
-            return LINGLONG_ERR("failed to parse new version", newVersion.error());
+        std::vector<api::types::v1::PackageInfoV2> filteredPackages;
+        filteredPackages.reserve(temp.size());
+
+        for (auto &[_, pkgInfo] : temp) {
+            filteredPackages.emplace_back(std::move(pkgInfo));
         }
 
-        if (*oldVersion < *newVersion) {
-            temp[key] = info;
+        auto it = list.find(pkgRepo);
+        if (it != list.end()) {
+            it->second = std::move(filteredPackages);
+        } else {
+            list.emplace(pkgRepo, std::move(filteredPackages));
         }
     }
-
-    list.clear();
-    std::transform(temp.begin(), temp.end(), std::back_inserter(list), [](const auto &pair) {
-        return pair.second;
-    });
 
     return LINGLONG_OK;
 }
@@ -2447,7 +2564,7 @@ Cli::RequestDirectories(const api::types::v1::PackageInfoV2 &info) noexcept
 
 int Cli::generateCache(const package::Reference &ref)
 {
-    LINGLONG_TRACE("generate cache for all applications");
+    LINGLONG_TRACE("generate cache for " + ref.toString());
     QEventLoop loop;
     QString jobIDReply;
     auto ret = connect(&this->pkgMan,
@@ -2478,43 +2595,67 @@ int Cli::generateCache(const package::Reference &ref)
         return -1;
     }
 
-    if (!result->id) {
-        this->printer.printErr(
-          LINGLONG_ERRV("\n" + QString::fromStdString(result->message), result->code));
-        return -1;
-    }
-
-    jobIDReply = QString::fromStdString(result->id.value());
+    jobIDReply = QString::fromStdString(result->id);
     return loop.exec();
 }
 
-utils::error::Result<std::string>
-Cli::ensureCache(const package::Reference &ref,
-                 const api::types::v1::RepositoryCacheLayersItem &appLayerItem) noexcept
+utils::error::Result<std::filesystem::path> Cli::ensureCache(
+  runtime::RunContext &runContext, const generator::ContainerCfgBuilder &cfgBuilder) noexcept
 {
-    LINGLONG_TRACE("ensure cache for: " + QString::fromStdString(appLayerItem.info.id));
+    LINGLONG_TRACE("ensure cache");
 
-    std::error_code ec;
-    // TODO: Here we need to judge the validity of the cache. The directory may be an empty directory.
-    auto appCache = std::filesystem::path(LINGLONG_ROOT) / "cache" / appLayerItem.commit;
+    auto appLayerItem = runContext.getCachedAppItem();
+    if (!appLayerItem) {
+        return LINGLONG_ERR(appLayerItem);
+    }
 
-    if (std::filesystem::exists(appCache, ec)) {
-        qDebug() << "The cache has been generated.";
+    auto appLayer = runContext.getAppLayer();
+    if (!appLayer) {
+        return LINGLONG_ERR("app layer not found");
+    }
+    auto appRef = appLayer->getReference();
+
+    auto appCache = std::filesystem::path(LINGLONG_ROOT) / "cache" / appLayerItem->commit;
+    do {
+        std::error_code ec;
+        if (!std::filesystem::exists(appCache, ec)) {
+            break;
+        }
+
+        // check ld.so.conf
+        {
+            auto ldSoConf = appCache / "ld.so.conf";
+            if (!std::filesystem::exists(ldSoConf, ec)) {
+                break;
+            }
+
+            // If the ld.so.conf exists, check if it is consistent with the current configuration.
+            auto ldConf = cfgBuilder.ldConf(appRef.arch.getTriplet().toStdString());
+            std::stringstream oldCache;
+            std::ifstream ifs(ldSoConf, std::ios::binary | std::ios::in);
+            if (!ifs.is_open()) {
+                return LINGLONG_ERR("failed to open " + QString::fromStdString(ldSoConf.string()));
+            }
+            oldCache << ifs.rdbuf();
+            qDebug() << "ld.so.conf:" << QString::fromStdString(ldConf);
+            qDebug() << "old ld.so.conf:" << QString::fromStdString(oldCache.str());
+            if (oldCache.str() != ldConf) {
+                break;
+            }
+        }
+
         return appCache;
-    }
-
-    if (ec) {
-        return LINGLONG_ERR(QString::fromStdString(ec.message()), ec.value());
-    }
+    } while (false);
 
     // Try to generate cache here
     QProcess process;
     process.setProgram(LINGLONG_LIBEXEC_DIR "/ll-dialog");
-    process.setArguments({ "-m", "startup", "--id", QString::fromStdString(appLayerItem.info.id) });
+    process.setArguments(
+      { "-m", "startup", "--id", QString::fromStdString(appLayerItem->info.id) });
     process.start();
     qDebug() << process.program() << process.arguments();
 
-    auto ret = this->generateCache(ref);
+    auto ret = this->generateCache(appRef);
     if (ret != 0) {
         this->notifier->notify(api::types::v1::InteractionRequest{
           .summary =

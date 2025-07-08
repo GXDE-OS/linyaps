@@ -5,9 +5,13 @@
  */
 #include "linglong/package/version.h"
 
+#include "linglong/package/fallback_version.h"
+#include "linglong/package/versionv2.h"
+
 #include <QRegularExpression>
 #include <QString>
-#include <QStringBuilder>
+
+#include <variant>
 
 #if QT_VERSION < QT_VERSION_CHECK(5, 14, 0)
 namespace Qt {
@@ -16,147 +20,115 @@ static auto SkipEmptyParts = QString::SkipEmptyParts;
 #endif
 
 namespace linglong::package {
-namespace {
 
-struct PreRelease
+utils::error::Result<Version> Version::parse(const QString &raw,
+                                             const ParseOptions parseOpt) noexcept
 {
-    explicit PreRelease(const QString &raw)
-        : list(raw.split('.', Qt::SkipEmptyParts))
-    {
+    LINGLONG_TRACE(QString("parse version %1").arg(raw));
+
+    auto versionV2 = VersionV2::parse(raw, parseOpt.strict);
+    if (versionV2) {
+        return Version(*versionV2);
     }
 
-    bool operator==(const PreRelease &that) const { return this->list == that.list; };
-
-    bool operator<(const PreRelease &that) const
-    {
-        auto limit = std::min(this->list.size(), that.list.size());
-        for (decltype(limit) i = 0; i < limit; i++) {
-            bool ok = false;
-            auto thisAsNumber = this->list[i].toInt(&ok);
-            if (!ok) {
-                thisAsNumber = std::numeric_limits<decltype(thisAsNumber)>::max();
-            }
-            auto thatAsNumber = that.list[i].toInt(&ok);
-            if (!ok) {
-                thatAsNumber = std::numeric_limits<decltype(thatAsNumber)>::max();
-            }
-
-            if (thisAsNumber != thatAsNumber) {
-                return thisAsNumber < thatAsNumber;
-            }
-
-            if (this->list[i] != that.list[i]) {
-                return this->list[i] < that.list[i];
-            }
-        }
-
-        if (this->list.isEmpty()) {
-            return false;
-        }
-
-        if (that.list.isEmpty()) {
-            return !this->list.isEmpty();
-        }
-
-        return this->list.size() < that.list.size();
+    if (!parseOpt.fallback) {
+        return LINGLONG_ERR("parse version failed");
     }
 
-    bool operator>(const PreRelease &that) const
-    {
-        auto limit = std::min(this->list.size(), that.list.size());
-        for (decltype(limit) i = 0; i < limit; i++) {
-            bool ok = false;
-            auto thisAsNumber = this->list[i].toInt(&ok);
-            if (!ok) {
-                thisAsNumber = std::numeric_limits<decltype(thisAsNumber)>::max();
-            }
-            auto thatAsNumber = that.list[i].toInt(&ok);
-            if (!ok) {
-                thatAsNumber = std::numeric_limits<decltype(thatAsNumber)>::max();
-            }
-
-            if (thisAsNumber != thatAsNumber) {
-                return thisAsNumber > thatAsNumber;
-            }
-
-            if (this->list[i] != that.list[i]) {
-                return this->list[i] > that.list[i];
-            }
-        }
-
-        if (this->list.isEmpty()) {
-            return !that.list.isEmpty();
-        }
-
-        if (that.list.isEmpty()) {
-            return false;
-        }
-
-        return this->list.size() > that.list.size();
+    auto versionV1 = VersionV1::parse(raw);
+    if (versionV1) {
+        return Version(*versionV1);
     }
 
-    QStringList list;
-};
-
-} // namespace
-
-utils::error::Result<Version> Version::parse(const QString &raw) noexcept
-try {
-    return Version(raw);
-} catch (const std::exception &e) {
-    LINGLONG_TRACE("parse version " + raw);
-    return LINGLONG_ERR(e);
+    auto fallbackVersion = FallbackVersion::parse(raw);
+    if (fallbackVersion) {
+        return Version(*fallbackVersion);
+    }
+    return LINGLONG_ERR("parse version failed");
 }
 
-Version::Version(const QString &raw)
+utils::error::Result<void> Version::validateDependVersion(const QString &raw) noexcept
 {
-    // modified from https://regex101.com/r/vkijKf/1/
+    LINGLONG_TRACE(QString{ "validate depend version %1" }.arg(raw));
     static auto regexExp = []() noexcept {
-        QRegularExpression regexExp(
-          R"(^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:\.(0|[1-9]\d*))?$)");
+        QRegularExpression regexExp(R"(^(0|[1-9]\d*)\.(0|[1-9]\d*)(?:\.(0|[1-9]\d*))?$)");
         regexExp.optimize();
         return regexExp;
     }();
 
     QRegularExpressionMatch matched = regexExp.match(raw);
-
     if (!matched.hasMatch()) {
-        throw std::runtime_error(
-          "version regex mismatched, please use four digits version like 1.0.0.0");
+        return LINGLONG_ERR(
+          "version regex mismatched, please use three digits version like MAJOR.MINOR[.PATCH]");
+    }
+    return LINGLONG_OK;
+}
+
+std::vector<linglong::api::types::v1::PackageInfoV2> Version::filterByFuzzyVersion(
+  std::vector<linglong::api::types::v1::PackageInfoV2> list, const QString &fuzzyVersion)
+{
+    for (auto it = list.begin(); it != list.end();) {
+        auto packageVerRet = package::Version::parse(it->version.c_str());
+        if (!packageVerRet) {
+            qWarning() << "Ignore invalid package record " << packageVerRet.error();
+            it = list.erase(it);
+            continue;
+        }
+
+        if (!packageVerRet->semanticMatch(fuzzyVersion)) {
+            it = list.erase(it);
+            continue;
+        }
+        ++it;
+    }
+    return list;
+}
+
+bool Version::semanticMatch(const QString &versionStr)
+{
+    if (std::holds_alternative<VersionV1>(version)) {
+        return std::get<VersionV1>(version).semanticMatch(versionStr);
     }
 
-    bool ok = false;
-    this->major = matched.captured(1).toLongLong(&ok);
-    if (!ok) {
-        throw std::runtime_error("major too large");
+    if (std::holds_alternative<VersionV2>(version)) {
+        return std::get<VersionV2>(version).semanticMatch(versionStr);
     }
-    this->minor = matched.captured(2).toLongLong(&ok);
-    if (!ok) {
-        throw std::runtime_error("minor too large");
+
+    if (std::holds_alternative<FallbackVersion>(version)) {
+        return std::get<FallbackVersion>(version).semanticMatch(versionStr);
     }
-    this->patch = matched.captured(3).toLongLong(&ok);
-    if (!ok) {
-        throw std::runtime_error("patch too large");
+
+    return false;
+}
+
+void Version::ignoreTweak() noexcept
+{
+    if (std::holds_alternative<VersionV1>(version)) {
+        std::get<VersionV1>(version).tweak = std::nullopt;
     }
-    if (!matched.captured(4).isNull()) {
-        this->tweak = matched.captured(4).toLongLong(&ok);
-        if (!ok) {
-            throw std::runtime_error("tweak too large");
-        }
+}
+
+bool Version::isVersionV1() noexcept
+{
+    return std::holds_alternative<VersionV1>(version);
+}
+
+bool Version::hasTweak() noexcept
+{
+    if (std::holds_alternative<VersionV1>(version)) {
+        return std::get<VersionV1>(version).tweak.has_value();
     }
+    return false;
 }
 
 bool Version::operator==(const Version &that) const noexcept
 {
-    if (this->tweak.has_value() != that.tweak.has_value()) {
-        return false;
-    }
-
-    auto thistweak = this->tweak.value_or(0);
-    auto thattweak = that.tweak.value_or(0);
-
-    return std::tie(this->major, this->minor, this->patch, thistweak)
-      == std::tie(that.major, that.minor, that.patch, thattweak);
+    return std::visit(
+      [&](const auto &thisVersion, const auto &thatVersion) {
+          return thisVersion == thatVersion;
+      },
+      this->version,
+      that.version);
 }
 
 bool Version::operator!=(const Version &that) const noexcept
@@ -166,24 +138,17 @@ bool Version::operator!=(const Version &that) const noexcept
 
 bool Version::operator<(const Version &that) const noexcept
 {
-    auto thistweak = this->tweak.value_or(0);
-    auto thattweak = that.tweak.value_or(0);
-
-    auto thisAsNumber = std::tie(this->major, this->minor, this->patch, thistweak);
-    auto thatAsNumber = std::tie(that.major, that.minor, that.patch, thattweak);
-
-    return thisAsNumber < thatAsNumber;
+    return std::visit(
+      [&](const auto &thisVersion, const auto &thatVersion) {
+          return thisVersion < thatVersion;
+      },
+      this->version,
+      that.version);
 }
 
 bool Version::operator>(const Version &that) const noexcept
 {
-    auto thistweak = this->tweak.value_or(0);
-    auto thattweak = that.tweak.value_or(0);
-
-    auto thisAsNumber = std::tie(this->major, this->minor, this->patch, thistweak);
-    auto thatAsNumber = std::tie(that.major, that.minor, that.patch, thattweak);
-
-    return thisAsNumber > thatAsNumber;
+    return !(*this == that) && !(*this < that);
 }
 
 bool Version::operator<=(const Version &that) const noexcept
@@ -193,15 +158,23 @@ bool Version::operator<=(const Version &that) const noexcept
 
 bool Version::operator>=(const Version &that) const noexcept
 {
-    return (*this == that) || (*this > that);
+    return !(*this < that);
 }
 
 QString Version::toString() const noexcept
 {
-    return QString("%1.%2.%3%4")
-      .arg(this->major)
-      .arg(this->minor)
-      .arg(this->patch)
-      .arg(this->tweak ? "." + QString::number(*this->tweak) : "");
+    if (std::holds_alternative<VersionV1>(version)) {
+        return std::get<VersionV1>(version).toString();
+    }
+
+    if (std::holds_alternative<VersionV2>(version)) {
+        return std::get<VersionV2>(version).toString();
+    }
+
+    if (std::holds_alternative<FallbackVersion>(version)) {
+        return std::get<FallbackVersion>(version).toString();
+    }
+
+    return QString("unknown version type");
 }
 } // namespace linglong::package

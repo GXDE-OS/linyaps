@@ -9,16 +9,17 @@
 #include <algorithm>
 #include <array>
 #include <cstdint>
+#include <cstring>
 
 namespace digest {
 
 namespace details {
-constexpr static inline uint32_t rotate_right(uint32_t x, unsigned n) noexcept
+constexpr static uint32_t rotate_right(uint32_t x, unsigned n) noexcept
 {
     return (x >> n) | (x << (32 - n));
 }
 
-constexpr static inline uint32_t to_big_endian(uint32_t val) noexcept
+constexpr static uint32_t to_big_endian(uint32_t val) noexcept
 {
 #if __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
     return x;
@@ -28,7 +29,7 @@ constexpr static inline uint32_t to_big_endian(uint32_t val) noexcept
 #endif
 }
 
-constexpr static inline uint64_t to_big_endian(uint64_t val) noexcept
+constexpr static uint64_t to_big_endian(uint64_t val) noexcept
 {
 #if __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
     return x;
@@ -40,32 +41,32 @@ constexpr static inline uint64_t to_big_endian(uint64_t val) noexcept
 #endif
 }
 
-constexpr static inline uint32_t sum0(uint32_t x) noexcept
+constexpr static uint32_t sum0(uint32_t x) noexcept
 {
     return rotate_right(x, 2) ^ rotate_right(x, 13) ^ rotate_right(x, 22);
 }
 
-constexpr static inline uint32_t sum1(uint32_t x) noexcept
+constexpr static uint32_t sum1(uint32_t x) noexcept
 {
     return rotate_right(x, 6) ^ rotate_right(x, 11) ^ rotate_right(x, 25);
 }
 
-constexpr static inline uint32_t sigma0(uint32_t x) noexcept
+constexpr static uint32_t sigma0(uint32_t x) noexcept
 {
     return rotate_right(x, 7) ^ rotate_right(x, 18) ^ (x >> 3);
 }
 
-constexpr static inline uint32_t sigma1(uint32_t x) noexcept
+constexpr static uint32_t sigma1(uint32_t x) noexcept
 {
     return rotate_right(x, 17) ^ rotate_right(x, 19) ^ (x >> 10);
 }
 
-constexpr static inline uint32_t Ch(uint32_t x, uint32_t y, uint32_t z) noexcept
+constexpr static uint32_t Ch(uint32_t x, uint32_t y, uint32_t z) noexcept
 {
     return (x & y) ^ ((~x) & z);
 }
 
-constexpr static inline uint32_t Maj(uint32_t x, uint32_t y, uint32_t z) noexcept
+constexpr static uint32_t Maj(uint32_t x, uint32_t y, uint32_t z) noexcept
 {
     return (x & y) ^ (x & z) ^ (y & z);
 }
@@ -149,7 +150,9 @@ private:
         for (std::size_t i = 0; i < block_num; ++i) {
             std::array<uint32_t, 16> M{};
             for (int j = 0; j < 16; ++j) {
-                M[j] = details::to_big_endian(reinterpret_cast<const uint32_t *>(data)[i * 16 + j]);
+                uint32_t tmp = 0;
+                std::memcpy(&tmp, &data[i * 64 + j * 4], 4);
+                M[j] = details::to_big_endian(tmp);
             }
 
             std::array<uint32_t, 64> W{};

@@ -6,10 +6,10 @@ cmake_minimum_required(VERSION 3.11.4)
 
 project(
   linglong
-  VERSION 1.8.1
+  VERSION 1.10.0
   DESCRIPTION "a container based application package manager for Linux desktop"
   HOMEPAGE_URL "https://github.com/OpenAtom-Linyaps/linyaps"
-  LANGUAGES CXX)
+  LANGUAGES CXX C)
 
 set(LINGLONG_VERSION
     ""
@@ -20,9 +20,14 @@ if(NOT ("${LINGLONG_VERSION}" STREQUAL ""))
   set(PROJECT_VERSION ${LINGLONG_VERSION})
 endif()
 
-set(ENABLE_UAB
+set(ENABLE_LINGLONG_APP_BUILDER_UTILS
     OFF
-    CACHE BOOL "enable building UAB")
+    CACHE BOOL "enable build ll-builder-utils to linglong app")
+
+set(BUILD_LINGLONG_BUILDER_UTILS_IN_BOX
+    OFF
+    CACHE BOOL "build ll-builder-utils in box")
+
 set(ENABLE_LINGLONG_INSTALLER
     OFF
     CACHE BOOL "enable linglong installer")
@@ -48,6 +53,17 @@ set(GETTEXT_DOMAIN_NAME
     "linyaps"
     CACHE STRING "The name of gettext domain.")
 set(QT_VERSION_MAJOR CACHE STRING "The major version of qt.")
+set(LINGLONG_EXPORT_PATH
+    "share"
+    CACHE STRING
+          "The path to export linglong config files, it must end with share.")
+
+if(NOT LINGLONG_EXPORT_PATH MATCHES ".*share$")
+  message(
+    WARNING
+      "LINGLONG_EXPORT_PATH '${LINGLONG_EXPORT_PATH}' must end with 'share'")
+  set(LINGLONG_EXPORT_PATH "share")
+endif()
 
 list(APPEND CMAKE_MODULE_PATH ${CMAKE_CURRENT_SOURCE_DIR}/cmake)
 include(PFL)
@@ -114,6 +130,17 @@ endif()
 
 set(linglong_EXTERNALS "ytj ytj::ytj")
 
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "^mips" OR CMAKE_SYSTEM_PROCESSOR MATCHES
+                                             "^MIPS")
+  message(
+    STATUS
+      "MIPS architecture detected. Globally adding -mxgot to CMAKE_CXX_FLAGS.")
+
+  set(CMAKE_CXX_FLAGS
+      "${CMAKE_CXX_FLAGS} -mxgot"
+      CACHE STRING "C++ compiler flags" FORCE)
+endif()
+
 # NOTE: UOS v20 do not have tl-expected packaged.
 find_package(tl-expected 1.0.0 QUIET)
 if(NOT tl-expected_FOUND)
@@ -162,6 +189,25 @@ endfunction()
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+include(GNUInstallDirs)
+# depends on GNUInstallDirs
+configure_file(configure.h.in ${CMAKE_CURRENT_BINARY_DIR}/configure.h @ONLY)
+include_directories(${CMAKE_CURRENT_BINARY_DIR})
+
+# build ll-build-utils only
+if(BUILD_LINGLONG_BUILDER_UTILS_IN_BOX)
+  pfl_init(AUTO)
+  pfl_add_libraries(
+    LIBS
+    api
+    ocppi
+    oci-cfg-generators
+    APPS
+    ll-builder-utils
+    uab)
+  return()
+endif()
 
 set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTORCC ON)
@@ -233,8 +279,6 @@ pfl_init(AUTO)
 add_subdirectory(external/http)
 add_subdirectory(tools/qdbusxml2cpp)
 
-include(GNUInstallDirs)
-
 pfl_add_libraries(
   LIBS
   api
@@ -244,14 +288,17 @@ pfl_add_libraries(
   linglong
   oci-cfg-generators
   APPS
+  ll-init
   ll-dialog
-  ll-box
   ll-builder
   ll-cli
   ll-package-manager
   llpkg
-  uab
   ll-session-helper)
+
+if(ENABLE_LINGLONG_APP_BUILDER_UTILS)
+  add_subdirectory(apps/ll-builder-utils)
+endif()
 
 add_subdirectory(misc)
 add_subdirectory(po)

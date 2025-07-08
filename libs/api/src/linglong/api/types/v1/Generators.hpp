@@ -36,6 +36,7 @@
 #include "linglong/api/types/v1/PackageManager1SearchResult.hpp"
 #include "linglong/api/types/v1/PackageManager1SearchParameters.hpp"
 #include "linglong/api/types/v1/PackageManager1RequestInteractionAdditionalMessage.hpp"
+#include "linglong/api/types/v1/PackageManager1PruneResult.hpp"
 #include "linglong/api/types/v1/PackageManager1PackageTaskResult.hpp"
 #include "linglong/api/types/v1/PackageManager1Package.hpp"
 #include "linglong/api/types/v1/PackageManager1ModifyRepoParameters.hpp"
@@ -45,6 +46,7 @@
 #include "linglong/api/types/v1/PackageManager1GetRepoInfoResult.hpp"
 #include "linglong/api/types/v1/PackageManager1GetRepoInfoResultRepoInfo.hpp"
 #include "linglong/api/types/v1/PackageInfoV2.hpp"
+#include "linglong/api/types/v1/PackageInfoDisplay.hpp"
 #include "linglong/api/types/v1/PackageInfo.hpp"
 #include "linglong/api/types/v1/OciConfigurationPatch.hpp"
 #include "linglong/api/types/v1/LayerInfo.hpp"
@@ -52,6 +54,9 @@
 #include "linglong/api/types/v1/InteractionReply.hpp"
 #include "linglong/api/types/v1/InteractionMessageType.hpp"
 #include "linglong/api/types/v1/InspectResult.hpp"
+#include "linglong/api/types/v1/ExtensionImpl.hpp"
+#include "linglong/api/types/v1/ExtensionDefine.hpp"
+#include "linglong/api/types/v1/ExportDirs.hpp"
 #include "linglong/api/types/v1/DialogMessage.hpp"
 #include "linglong/api/types/v1/DialogHandShakePayload.hpp"
 #include "linglong/api/types/v1/ContainerProcessStateInfo.hpp"
@@ -133,6 +138,15 @@ void to_json(json & j, const DialogHandShakePayload & x);
 void from_json(const json & j, DialogMessage & x);
 void to_json(json & j, const DialogMessage & x);
 
+void from_json(const json & j, ExportDirs & x);
+void to_json(json & j, const ExportDirs & x);
+
+void from_json(const json & j, ExtensionDefine & x);
+void to_json(json & j, const ExtensionDefine & x);
+
+void from_json(const json & j, ExtensionImpl & x);
+void to_json(json & j, const ExtensionImpl & x);
+
 void from_json(const json & j, InspectResult & x);
 void to_json(json & j, const InspectResult & x);
 
@@ -150,6 +164,9 @@ void to_json(json & j, const OciConfigurationPatch & x);
 
 void from_json(const json & j, PackageInfo & x);
 void to_json(json & j, const PackageInfo & x);
+
+void from_json(const json & j, PackageInfoDisplay & x);
+void to_json(json & j, const PackageInfoDisplay & x);
 
 void from_json(const json & j, PackageInfoV2 & x);
 void to_json(json & j, const PackageInfoV2 & x);
@@ -177,6 +194,9 @@ void to_json(json & j, const PackageManager1Package & x);
 
 void from_json(const json & j, PackageManager1PackageTaskResult & x);
 void to_json(json & j, const PackageManager1PackageTaskResult & x);
+
+void from_json(const json & j, PackageManager1PruneResult & x);
+void to_json(json & j, const PackageManager1PruneResult & x);
 
 void from_json(const json & j, PackageManager1RequestInteractionAdditionalMessage & x);
 void to_json(json & j, const PackageManager1RequestInteractionAdditionalMessage & x);
@@ -378,8 +398,11 @@ inline void from_json(const json & j, BuilderProjectPackage& x) {
 x.architecture = get_stack_optional<std::string>(j, "architecture");
 x.channel = get_stack_optional<std::string>(j, "channel");
 x.description = j.at("description").get<std::string>();
+x.env = get_stack_optional<std::map<std::string, std::string>>(j, "env");
+x.extensionOf = get_stack_optional<std::string>(j, "extension_of");
 x.id = j.at("id").get<std::string>();
 x.kind = j.at("kind").get<std::string>();
+x.libs = get_stack_optional<std::vector<std::string>>(j, "libs");
 x.name = j.at("name").get<std::string>();
 x.version = j.at("version").get<std::string>();
 }
@@ -393,8 +416,17 @@ if (x.channel) {
 j["channel"] = x.channel;
 }
 j["description"] = x.description;
+if (x.env) {
+j["env"] = x.env;
+}
+if (x.extensionOf) {
+j["extension_of"] = x.extensionOf;
+}
 j["id"] = x.id;
 j["kind"] = x.kind;
+if (x.libs) {
+j["libs"] = x.libs;
+}
 j["name"] = x.name;
 j["version"] = x.version;
 }
@@ -553,6 +585,47 @@ j["payload"] = x.payload;
 j["type"] = x.type;
 }
 
+inline void from_json(const json & j, ExportDirs& x) {
+x.exportPaths = j.at("export-paths").get<std::vector<std::string>>();
+}
+
+inline void to_json(json & j, const ExportDirs & x) {
+j = json::object();
+j["export-paths"] = x.exportPaths;
+}
+
+inline void from_json(const json & j, ExtensionDefine& x) {
+x.allowEnv = get_stack_optional<std::map<std::string, std::string>>(j, "allow_env");
+x.directory = j.at("directory").get<std::string>();
+x.name = j.at("name").get<std::string>();
+x.version = j.at("version").get<std::string>();
+}
+
+inline void to_json(json & j, const ExtensionDefine & x) {
+j = json::object();
+if (x.allowEnv) {
+j["allow_env"] = x.allowEnv;
+}
+j["directory"] = x.directory;
+j["name"] = x.name;
+j["version"] = x.version;
+}
+
+inline void from_json(const json & j, ExtensionImpl& x) {
+x.env = get_stack_optional<std::map<std::string, std::string>>(j, "env");
+x.libs = get_stack_optional<std::vector<std::string>>(j, "libs");
+}
+
+inline void to_json(json & j, const ExtensionImpl & x) {
+j = json::object();
+if (x.env) {
+j["env"] = x.env;
+}
+if (x.libs) {
+j["libs"] = x.libs;
+}
+}
+
 inline void from_json(const json & j, InspectResult& x) {
 x.appID = get_stack_optional<std::string>(j, "appID");
 }
@@ -661,6 +734,69 @@ j["size"] = x.size;
 j["version"] = x.version;
 }
 
+inline void from_json(const json & j, PackageInfoDisplay& x) {
+x.arch = j.at("arch").get<std::vector<std::string>>();
+x.base = j.at("base").get<std::string>();
+x.channel = j.at("channel").get<std::string>();
+x.command = get_stack_optional<std::vector<std::string>>(j, "command");
+x.compatibleVersion = get_stack_optional<std::string>(j, "compatible_version");
+x.description = get_stack_optional<std::string>(j, "description");
+x.extImpl = get_stack_optional<ExtensionImpl>(j, "ext_impl");
+x.extensions = get_stack_optional<std::vector<ExtensionDefine>>(j, "extensions");
+x.id = j.at("id").get<std::string>();
+x.kind = j.at("kind").get<std::string>();
+x.packageInfoDisplayModule = j.at("module").get<std::string>();
+x.name = j.at("name").get<std::string>();
+x.permissions = get_stack_optional<ApplicationConfigurationPermissions>(j, "permissions");
+x.runtime = get_stack_optional<std::string>(j, "runtime");
+x.schemaVersion = j.at("schema_version").get<std::string>();
+x.size = j.at("size").get<int64_t>();
+x.uuid = get_stack_optional<std::string>(j, "uuid");
+x.version = j.at("version").get<std::string>();
+x.installTime = get_stack_optional<int64_t>(j, "install_time");
+}
+
+inline void to_json(json & j, const PackageInfoDisplay & x) {
+j = json::object();
+j["arch"] = x.arch;
+j["base"] = x.base;
+j["channel"] = x.channel;
+if (x.command) {
+j["command"] = x.command;
+}
+if (x.compatibleVersion) {
+j["compatible_version"] = x.compatibleVersion;
+}
+if (x.description) {
+j["description"] = x.description;
+}
+if (x.extImpl) {
+j["ext_impl"] = x.extImpl;
+}
+if (x.extensions) {
+j["extensions"] = x.extensions;
+}
+j["id"] = x.id;
+j["kind"] = x.kind;
+j["module"] = x.packageInfoDisplayModule;
+j["name"] = x.name;
+if (x.permissions) {
+j["permissions"] = x.permissions;
+}
+if (x.runtime) {
+j["runtime"] = x.runtime;
+}
+j["schema_version"] = x.schemaVersion;
+j["size"] = x.size;
+if (x.uuid) {
+j["uuid"] = x.uuid;
+}
+j["version"] = x.version;
+if (x.installTime) {
+j["install_time"] = x.installTime;
+}
+}
+
 inline void from_json(const json & j, PackageInfoV2& x) {
 x.arch = j.at("arch").get<std::vector<std::string>>();
 x.base = j.at("base").get<std::string>();
@@ -668,6 +804,8 @@ x.channel = j.at("channel").get<std::string>();
 x.command = get_stack_optional<std::vector<std::string>>(j, "command");
 x.compatibleVersion = get_stack_optional<std::string>(j, "compatible_version");
 x.description = get_stack_optional<std::string>(j, "description");
+x.extImpl = get_stack_optional<ExtensionImpl>(j, "ext_impl");
+x.extensions = get_stack_optional<std::vector<ExtensionDefine>>(j, "extensions");
 x.id = j.at("id").get<std::string>();
 x.kind = j.at("kind").get<std::string>();
 x.packageInfoV2Module = j.at("module").get<std::string>();
@@ -693,6 +831,12 @@ j["compatible_version"] = x.compatibleVersion;
 }
 if (x.description) {
 j["description"] = x.description;
+}
+if (x.extImpl) {
+j["ext_impl"] = x.extImpl;
+}
+if (x.extensions) {
+j["extensions"] = x.extensions;
 }
 j["id"] = x.id;
 j["kind"] = x.kind;
@@ -762,16 +906,20 @@ j["version"] = x.version;
 inline void from_json(const json & j, PackageManager1InstallParameters& x) {
 x.options = j.at("options").get<CommonOptions>();
 x.package = j.at("package").get<PackageManager1InstallParametersPacakge>();
+x.repo = get_stack_optional<std::string>(j, "repo");
 }
 
 inline void to_json(json & j, const PackageManager1InstallParameters & x) {
 j = json::object();
 j["options"] = x.options;
 j["package"] = x.package;
+if (x.repo) {
+j["repo"] = x.repo;
+}
 }
 
 inline void from_json(const json & j, PackageManager1JobInfo& x) {
-x.id = get_stack_optional<std::string>(j, "id");
+x.id = j.at("id").get<std::string>();
 x.code = j.at("code").get<int64_t>();
 x.message = j.at("message").get<std::string>();
 x.type = j.at("type").get<std::string>();
@@ -779,9 +927,7 @@ x.type = j.at("type").get<std::string>();
 
 inline void to_json(json & j, const PackageManager1JobInfo & x) {
 j = json::object();
-if (x.id) {
 j["id"] = x.id;
-}
 j["code"] = x.code;
 j["message"] = x.message;
 j["type"] = x.type;
@@ -836,6 +982,23 @@ j["message"] = x.message;
 j["type"] = x.type;
 }
 
+inline void from_json(const json & j, PackageManager1PruneResult& x) {
+x.packages = get_stack_optional<std::vector<PackageInfoV2>>(j, "packages");
+x.code = j.at("code").get<int64_t>();
+x.message = j.at("message").get<std::string>();
+x.type = j.at("type").get<std::string>();
+}
+
+inline void to_json(json & j, const PackageManager1PruneResult & x) {
+j = json::object();
+if (x.packages) {
+j["packages"] = x.packages;
+}
+j["code"] = x.code;
+j["message"] = x.message;
+j["type"] = x.type;
+}
+
 inline void from_json(const json & j, PackageManager1RequestInteractionAdditionalMessage& x) {
 x.localRef = j.at("LocalRef").get<std::string>();
 x.remoteRef = j.at("RemoteRef").get<std::string>();
@@ -849,15 +1012,17 @@ j["RemoteRef"] = x.remoteRef;
 
 inline void from_json(const json & j, PackageManager1SearchParameters& x) {
 x.id = j.at("id").get<std::string>();
+x.repos = j.at("repos").get<std::vector<std::string>>();
 }
 
 inline void to_json(json & j, const PackageManager1SearchParameters & x) {
 j = json::object();
 j["id"] = x.id;
+j["repos"] = x.repos;
 }
 
 inline void from_json(const json & j, PackageManager1SearchResult& x) {
-x.packages = get_stack_optional<std::vector<PackageInfoV2>>(j, "packages");
+x.packages = get_stack_optional<std::map<std::string, std::vector<PackageInfoV2>>>(j, "packages");
 x.code = j.at("code").get<int64_t>();
 x.message = j.at("message").get<std::string>();
 x.type = j.at("type").get<std::string>();
@@ -1061,6 +1226,9 @@ x.commonResult = get_stack_optional<CommonResult>(j, "CommonResult");
 x.containerProcessStateInfo = get_stack_optional<ContainerProcessStateInfo>(j, "ContainerProcessStateInfo");
 x.dialogHandShakePayload = get_stack_optional<DialogHandShakePayload>(j, "DialogHandShakePayload");
 x.dialogMessage = get_stack_optional<DialogMessage>(j, "DialogMessage");
+x.exportDirs = get_stack_optional<ExportDirs>(j, "ExportDirs");
+x.extensionDefine = get_stack_optional<ExtensionDefine>(j, "ExtensionDefine");
+x.extensionImpl = get_stack_optional<ExtensionImpl>(j, "ExtensionImpl");
 x.inspectResult = get_stack_optional<InspectResult>(j, "InspectResult");
 x.interactionMessageType = get_stack_optional<InteractionMessageType>(j, "InteractionMessageType");
 x.interactionReply = get_stack_optional<InteractionReply>(j, "InteractionReply");
@@ -1068,6 +1236,7 @@ x.interactionRequest = get_stack_optional<InteractionRequest>(j, "InteractionReq
 x.layerInfo = get_stack_optional<LayerInfo>(j, "LayerInfo");
 x.ociConfigurationPatch = get_stack_optional<OciConfigurationPatch>(j, "OCIConfigurationPatch");
 x.packageInfo = get_stack_optional<PackageInfo>(j, "PackageInfo");
+x.packageInfoDisplay = get_stack_optional<PackageInfoDisplay>(j, "PackageInfoDisplay");
 x.packageInfoV2 = get_stack_optional<PackageInfoV2>(j, "PackageInfoV2");
 x.packageManager1GetRepoInfoResult = get_stack_optional<PackageManager1GetRepoInfoResult>(j, "PackageManager1GetRepoInfoResult");
 x.packageManager1InstallLayerFDResult = get_stack_optional<CommonResult>(j, "PackageManager1InstallLayerFDResult");
@@ -1077,6 +1246,7 @@ x.packageManager1ModifyRepoParameters = get_stack_optional<PackageManager1Modify
 x.packageManager1ModifyRepoResult = get_stack_optional<CommonResult>(j, "PackageManager1ModifyRepoResult");
 x.packageManager1Package = get_stack_optional<PackageManager1Package>(j, "PackageManager1Package");
 x.packageManager1PackageTaskResult = get_stack_optional<PackageManager1PackageTaskResult>(j, "PackageManager1PackageTaskResult");
+x.packageManager1PruneResult = get_stack_optional<PackageManager1PruneResult>(j, "PackageManager1PruneResult");
 x.packageManager1RequestInteractionAdditionalMessage = get_stack_optional<PackageManager1RequestInteractionAdditionalMessage>(j, "PackageManager1RequestInteractionAdditionalMessage");
 x.packageManager1SearchParameters = get_stack_optional<PackageManager1SearchParameters>(j, "PackageManager1SearchParameters");
 x.packageManager1SearchResult = get_stack_optional<PackageManager1SearchResult>(j, "PackageManager1SearchResult");
@@ -1128,6 +1298,15 @@ j["DialogHandShakePayload"] = x.dialogHandShakePayload;
 if (x.dialogMessage) {
 j["DialogMessage"] = x.dialogMessage;
 }
+if (x.exportDirs) {
+j["ExportDirs"] = x.exportDirs;
+}
+if (x.extensionDefine) {
+j["ExtensionDefine"] = x.extensionDefine;
+}
+if (x.extensionImpl) {
+j["ExtensionImpl"] = x.extensionImpl;
+}
 if (x.inspectResult) {
 j["InspectResult"] = x.inspectResult;
 }
@@ -1148,6 +1327,9 @@ j["OCIConfigurationPatch"] = x.ociConfigurationPatch;
 }
 if (x.packageInfo) {
 j["PackageInfo"] = x.packageInfo;
+}
+if (x.packageInfoDisplay) {
+j["PackageInfoDisplay"] = x.packageInfoDisplay;
 }
 if (x.packageInfoV2) {
 j["PackageInfoV2"] = x.packageInfoV2;
@@ -1175,6 +1357,9 @@ j["PackageManager1Package"] = x.packageManager1Package;
 }
 if (x.packageManager1PackageTaskResult) {
 j["PackageManager1PackageTaskResult"] = x.packageManager1PackageTaskResult;
+}
+if (x.packageManager1PruneResult) {
+j["PackageManager1PruneResult"] = x.packageManager1PruneResult;
 }
 if (x.packageManager1RequestInteractionAdditionalMessage) {
 j["PackageManager1RequestInteractionAdditionalMessage"] = x.packageManager1RequestInteractionAdditionalMessage;

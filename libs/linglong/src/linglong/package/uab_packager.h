@@ -47,9 +47,10 @@ struct elfHelper
 
     [[nodiscard]] auto ElfPtr() const { return e; }
 
-    [[nodiscard]] utils::error::Result<void> addNewSection(const QByteArray &sectionName,
-                                                           const QFileInfo &dataFile,
-                                                           QStringList flags = {}) const noexcept;
+    [[nodiscard]] utils::error::Result<void>
+    addNewSection(const QByteArray &sectionName,
+                  const QFileInfo &dataFile,
+                  const QStringList &flags = {}) const noexcept;
 
 private:
     elfHelper(QByteArray path, int fd, Elf *ptr);
@@ -62,7 +63,7 @@ private:
 class UABPackager
 {
 public:
-    explicit UABPackager(const QDir &workingDir);
+    explicit UABPackager(const QDir &projectDir, QDir workingDir);
     ~UABPackager();
 
     UABPackager(UABPackager &&) = delete;
@@ -76,6 +77,12 @@ public:
     utils::error::Result<void> loadNeededFiles() noexcept;
     utils::error::Result<void> setLoader(const QString &loader) noexcept;
     utils::error::Result<void> setCompressor(const QString &compressor) noexcept;
+    utils::error::Result<void> setDefaultHeader(const QString &header) noexcept;
+    utils::error::Result<void> setDefaultLoader(const QString &loader) noexcept;
+    utils::error::Result<void> setDefaultBox(const QString &box) noexcept;
+    utils::error::Result<void>
+    setBundleCB(std::function<utils::error::Result<void>(const QString &, const QString &)>
+                  bundleCB) noexcept;
 
 private:
     [[nodiscard]] utils::error::Result<void> packIcon() noexcept;
@@ -98,5 +105,9 @@ private:
     std::filesystem::path workDir;
     QString loader;
     QString compressor = "lz4";
+    QString defaultHeader;
+    QString defaultLoader;
+    QString defaultBox;
+    std::function<utils::error::Result<void>(const QString &, const QString &)> bundleCB;
 };
 } // namespace linglong::package

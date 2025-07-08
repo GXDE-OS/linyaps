@@ -61,7 +61,7 @@ public:
                               value.toLocal8Bit().constData());
     }
 
-    template<typename Value>
+    template <typename Value>
     auto getValue(const QString &key, const GroupName &group) const -> error::Result<Value>
     {
         LINGLONG_TRACE(QString("get %1 from %2").arg(key, group));
@@ -132,7 +132,7 @@ public:
 
     auto hasKey(const QString &key, const GroupName &group) -> error::Result<bool>
     {
-        LINGLONG_TRACE(QString("check %1 is in %2 or not").arg(key).arg(group));
+        LINGLONG_TRACE(QString("check %1 is in %2 or not").arg(key, group));
 
         g_autoptr(GError) gErr = nullptr;
         if (g_key_file_has_key(this->gKeyFile.get(),
@@ -151,7 +151,7 @@ public:
 private:
     GKeyFileWrapper()
         : gKeyFile(std::unique_ptr<GKeyFile, decltype(&g_key_file_free)>(g_key_file_new(),
-                                                                         g_key_file_free)) {};
+                                                                         g_key_file_free)) { };
     std::unique_ptr<GKeyFile, decltype(&g_key_file_free)> gKeyFile;
 };
 

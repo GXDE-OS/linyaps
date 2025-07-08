@@ -7,6 +7,7 @@
 #pragma once
 
 #include "linglong/api/types/v1/OciConfigurationPatch.hpp"
+#include "linglong/oci-cfg-generators/container_cfg_builder.h"
 #include "linglong/package/reference.h"
 #include "linglong/runtime/container.h"
 #include "linglong/utils/error/error.h"
@@ -37,8 +38,8 @@ inline std::string genContainerID(const package::Reference &ref) noexcept
       .toStdString();
 }
 
-// getBundleDir 用于获取容器的运行目录
-inline utils::error::Result<std::filesystem::path> getBundleDir(const std::string &containerID)
+// Used to obtain a clean container bundle directory.
+inline utils::error::Result<std::filesystem::path> makeBundleDir(const std::string &containerID)
 {
     LINGLONG_TRACE("get bundle dir");
 
@@ -47,7 +48,15 @@ inline utils::error::Result<std::filesystem::path> getBundleDir(const std::strin
     auto bundle = runtimeDir / "linglong" / containerID;
 
     std::error_code ec;
-    if (!std::filesystem::create_directories(bundle, ec)) {
+    if (std::filesystem::exists(bundle, ec)) {
+        std::filesystem::remove_all(bundle, ec);
+        if (ec) {
+            qWarning() << QString("failed to remove bundle directory %1: %2")
+                            .arg(bundle.c_str(), ec.message().c_str());
+        }
+    }
+
+    if (!std::filesystem::create_directories(bundle, ec) && ec) {
         return LINGLONG_ERR(QString("failed to create bundle directory %1: %2")
                               .arg(bundle.c_str(), ec.message().c_str()));
     }
@@ -55,37 +64,15 @@ inline utils::error::Result<std::filesystem::path> getBundleDir(const std::strin
     return bundle;
 }
 
-struct ContainerOptions
-{
-    QString appID;
-    QString containerID;
-
-    std::optional<QDir> runtimeDir; // mount to /runtime
-    QDir baseDir;                   // mount to /
-    std::optional<QDir> appDir;     // mount to /opt/apps/${info.appid}/files
-    std::filesystem::path bundle;
-
-    std::vector<api::types::v1::OciConfigurationPatch> patches;
-    std::vector<ocppi::runtime::config::types::Mount> mounts; // extra mounts
-    ocppi::runtime::config::types::Hooks hooks;
-    std::vector<std::string> masks;
-};
-
 class ContainerBuilder : public QObject
 {
     Q_OBJECT
 public:
     explicit ContainerBuilder(ocppi::cli::CLI &cli);
 
-    auto create(const ContainerOptions &opts) noexcept
+    auto create(const linglong::generator::ContainerCfgBuilder &cfgBuilder,
+                const QString &containerID) noexcept
       -> utils::error::Result<std::unique_ptr<Container>>;
-
-    auto createWithConfig(const ocppi::runtime::config::types::Config &originalConfig,
-                          const QString &containerID) noexcept
-      -> utils::error::Result<std::unique_ptr<Container>>;
-
-    auto getOCIConfig(const ContainerOptions &opts) noexcept
-      -> utils::error::Result<ocppi::runtime::config::types::Config>;
 
 private:
     ocppi::cli::CLI &cli;

@@ -6,25 +6,47 @@
 
 #pragma once
 
+#include "linglong/api/types/v1/PackageInfoV2.hpp"
+#include "linglong/package/fallback_version.h"
+#include "linglong/package/versionv1.h"
+#include "linglong/package/versionv2.h"
 #include "linglong/utils/error/error.h"
 
 #include <QString>
 
-#include <optional>
+#include <variant>
 
 namespace linglong::package {
 
-// This is a 4 number semver
+struct ParseOptions
+{
+    bool strict = true;   // 是否严格解析
+    bool fallback = true; // 是否允许回退到 V1 解析
+};
+
 class Version final
 {
 public:
-    static utils::error::Result<Version> parse(const QString &raw) noexcept;
-    explicit Version(const QString &raw);
+    static utils::error::Result<Version> parse(const QString &raw,
+                                               const ParseOptions parseOpt = {
+                                                 .strict = true, .fallback = true }) noexcept;
 
-    qlonglong major = 0;
-    qlonglong minor = 0;
-    qlonglong patch = 0;
-    std::optional<qlonglong> tweak = {};
+    static std::vector<linglong::api::types::v1::PackageInfoV2> filterByFuzzyVersion(
+      std::vector<linglong::api::types::v1::PackageInfoV2> list, const QString &fuzzyVersion);
+    bool semanticMatch(const QString &versionStr);
+
+    static utils::error::Result<void> validateDependVersion(const QString &raw) noexcept;
+    explicit Version(const QString &raw) = delete;
+
+    explicit Version(const VersionV1 &version) { this->version = version; };
+
+    explicit Version(const VersionV2 &version) { this->version = version; };
+
+    explicit Version(const FallbackVersion &version) { this->version = version; };
+
+    void ignoreTweak() noexcept;
+    bool isVersionV1() noexcept;
+    bool hasTweak() noexcept;
 
     bool operator==(const Version &that) const noexcept;
     bool operator!=(const Version &that) const noexcept;
@@ -34,5 +56,9 @@ public:
     bool operator>=(const Version &that) const noexcept;
 
     QString toString() const noexcept;
+
+private:
+    std::variant<VersionV2, VersionV1, FallbackVersion> version;
 };
+
 } // namespace linglong::package

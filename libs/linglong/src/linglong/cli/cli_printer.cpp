@@ -9,6 +9,7 @@
 #include "linglong/api/types/v1/Generators.hpp"
 #include "linglong/api/types/v1/State.hpp"
 #include "linglong/package/reference.h"
+#include "linglong/package/version.h"
 #include "linglong/utils/gettext.h"
 
 #include <QJsonArray>
@@ -66,7 +67,7 @@ std::string adjustDisplayWidth(const QString &str, int targetWidth)
     return (str + QString(targetWidth - currentWidth, QChar(' '))).toStdString();
 }
 
-void CLIPrinter::printPackages(const std::vector<api::types::v1::PackageInfoV2> &list)
+void CLIPrinter::printPackages(const std::vector<api::types::v1::PackageInfoDisplay> &list)
 {
     std::cout << "\033[38;5;214m" << std::left << adjustDisplayWidth(qUtf8Printable(_("ID")), 43)
               << adjustDisplayWidth(qUtf8Printable(_("Name")), 33)
@@ -95,8 +96,76 @@ void CLIPrinter::printPackages(const std::vector<api::types::v1::PackageInfoV2> 
         auto nameOffset = nameStr.size() - nameWcswidth;
         std::cout << std::setw(43) << info.id + " " << std::setw(33 + nameOffset) << nameStr + " "
                   << std::setw(16) << info.version + " " << std::setw(16) << info.channel + " "
-                  << std::setw(12) << info.packageInfoV2Module + " "
+                  << std::setw(12) << info.packageInfoDisplayModule + " "
                   << simpleDescription.toStdString() << std::endl;
+    }
+}
+
+void CLIPrinter::printSearchResult(
+  std::map<std::string, std::vector<api::types::v1::PackageInfoV2>> list)
+{
+    if (list.empty()) {
+        std::cerr << _("No packages found in the remote repo.") << std::endl;
+        return;
+    }
+
+    // 搜索结果排序, 优先级为 repo > id > channel > module > version, 高版本在前
+    for (auto &[repo, packages] : list) {
+        std::sort(packages.begin(), packages.end(), [](const auto &lhs, const auto &rhs) {
+            if (lhs.id != rhs.id)
+                return lhs.id < rhs.id;
+            if (lhs.channel != rhs.channel)
+                return lhs.channel < rhs.channel;
+            if (lhs.packageInfoV2Module != rhs.packageInfoV2Module)
+                return lhs.packageInfoV2Module < rhs.packageInfoV2Module;
+
+            auto lhsVer = package::Version::parse(lhs.version.c_str());
+            if (!lhsVer) {
+                return false;
+            }
+            auto rhsVer = package::Version::parse(rhs.version.c_str());
+            if (!rhsVer) {
+                return false;
+            }
+
+            return *lhsVer > *rhsVer;
+        });
+    }
+
+    std::cout << "\033[38;5;214m" << std::left << adjustDisplayWidth(qUtf8Printable(_("ID")), 43)
+              << adjustDisplayWidth(qUtf8Printable(_("Name")), 33)
+              << adjustDisplayWidth(qUtf8Printable(_("Version")), 16)
+              << adjustDisplayWidth(qUtf8Printable(_("Channel")), 16)
+              << adjustDisplayWidth(qUtf8Printable(_("Module")), 12)
+              << adjustDisplayWidth(qUtf8Printable(_("Repo")), 10)
+              << qUtf8Printable(_("Description")) << "\033[0m" << std::endl;
+    for (const auto &[pkgRepo, packages] : list) {
+        for (const auto &pkg : packages) {
+            auto simpleDescription =
+              QString::fromStdString(pkg.description.value_or("")).simplified();
+            auto simpleDescriptionWStr = simpleDescription.toStdWString();
+            auto simpleDescriptionWcswidth = wcswidth(simpleDescriptionWStr.c_str(), -1);
+            if (simpleDescriptionWcswidth > 56) {
+                simpleDescriptionWStr = subwstr(simpleDescriptionWStr, 53) + L"...";
+                simpleDescription = QString::fromStdWString(simpleDescriptionWStr);
+            }
+
+            auto name = QString::fromStdString(pkg.name).simplified();
+            auto nameWStr = name.toStdWString();
+            auto nameWcswidth = wcswidth(nameWStr.c_str(), -1);
+            if (nameWcswidth > 33) {
+                nameWStr = subwstr(nameWStr, 29) + L"...";
+                nameWcswidth = wcswidth(nameWStr.c_str(), -1);
+                name = QString::fromStdWString(nameWStr);
+            }
+            auto nameStr = name.toStdString();
+            auto nameOffset = nameStr.size() - nameWcswidth;
+            std::cout << std::setw(43) << pkg.id + " " << std::setw(33 + nameOffset)
+                      << nameStr + " " << std::setw(16) << pkg.version + " " << std::setw(16)
+                      << pkg.channel + " " << std::setw(12) << pkg.packageInfoV2Module + " "
+                      << std::setw(10) << pkgRepo + " " << simpleDescription.toStdString()
+                      << std::endl;
+        }
     }
 }
 
@@ -189,11 +258,11 @@ void CLIPrinter::printRepoConfig(const api::types::v1::RepoConfigV2 &repoInfo)
 
     auto repos = repoInfo.repos;
     // 按照优先级从高到低排序
-    std::sort(repos.begin(),
-              repos.end(),
-              [](const api::types::v1::Repo &a, const api::types::v1::Repo &b) {
-                  return a.priority > b.priority;
-              });
+    std::stable_sort(repos.begin(),
+                     repos.end(),
+                     [](const api::types::v1::Repo &a, const api::types::v1::Repo &b) {
+                         return a.priority > b.priority;
+                     });
     for (const auto &repo : repos) {
         // url 超长省略
         const std::string &url =
@@ -272,6 +341,11 @@ void CLIPrinter::printInspect(const api::types::v1::InspectResult &result)
 {
     std::cout << "appID:\t" << (result.appID.has_value() ? result.appID.value() : "none")
               << std::endl;
+}
+
+void CLIPrinter::printMessage(const QString &message)
+{
+    std::cout << message.toStdString() << std::endl;
 }
 
 } // namespace linglong::cli

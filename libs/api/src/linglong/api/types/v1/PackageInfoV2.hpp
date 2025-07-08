@@ -17,6 +17,8 @@
 #include <nlohmann/json.hpp>
 #include "linglong/api/types/v1/helper.hpp"
 
+#include "linglong/api/types/v1/ExtensionImpl.hpp"
+#include "linglong/api/types/v1/ExtensionDefine.hpp"
 #include "linglong/api/types/v1/ApplicationConfigurationPermissions.hpp"
 
 namespace linglong {
@@ -25,12 +27,16 @@ namespace types {
 namespace v1 {
 /**
 * this is the each item output of ll-cli list --json
+*
+* package info of package manager search
 */
 
 using nlohmann::json;
 
 /**
 * this is the each item output of ll-cli list --json
+*
+* package info of package manager search
 */
 struct PackageInfoV2 {
 /**
@@ -57,6 +63,11 @@ std::optional<std::string> compatibleVersion;
 * description of package info
 */
 std::optional<std::string> description;
+std::optional<ExtensionImpl> extImpl;
+/**
+* description of extension
+*/
+std::optional<std::vector<ExtensionDefine>> extensions;
 /**
 * id of package info
 */

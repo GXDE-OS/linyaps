@@ -6,7 +6,7 @@
 
 #include "hooks.h"
 
-#include "linglong/utils/configure.h"
+#include "configure.h"
 #include "linglong/utils/error/error.h"
 
 #include <array>

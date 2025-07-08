@@ -35,8 +35,11 @@ pfl_add_library(
   src/linglong/cli/printer.h
   src/linglong/cli/terminal_notifier.cpp
   src/linglong/cli/terminal_notifier.h
+  src/linglong/extension/extension.cpp
   src/linglong/package/architecture.cpp
   src/linglong/package/architecture.h
+  src/linglong/package/fallback_version.cpp
+  src/linglong/package/fallback_version.h
   src/linglong/package/fuzzy_reference.cpp
   src/linglong/package/fuzzy_reference.h
   src/linglong/package/layer_dir.cpp
@@ -51,14 +54,17 @@ pfl_add_library(
   src/linglong/package_manager/package_task.h
   src/linglong/package/reference.cpp
   src/linglong/package/reference.h
+  src/linglong/package/semver.hpp
   src/linglong/package/uab_file.cpp
   src/linglong/package/uab_file.h
   src/linglong/package/uab_packager.cpp
   src/linglong/package/uab_packager.h
   src/linglong/package/version.cpp
   src/linglong/package/version.h
-  src/linglong/package/version_range.cpp
-  src/linglong/package/version_range.h
+  src/linglong/package/versionv1.cpp
+  src/linglong/package/versionv1.h
+  src/linglong/package/versionv2.cpp
+  src/linglong/package/versionv2.h
   src/linglong/repo/client_factory.cpp
   src/linglong/repo/client_factory.h
   src/linglong/repo/config.cpp
@@ -73,6 +79,8 @@ pfl_add_library(
   src/linglong/runtime/container_builder.h
   src/linglong/runtime/container.cpp
   src/linglong/runtime/container.h
+  src/linglong/runtime/run_context.cpp
+  src/linglong/runtime/run_context.h
   TESTS
   ll-tests
   COMPILE_FEATURES

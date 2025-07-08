@@ -6,7 +6,9 @@
 
 #pragma once
 
+#include "linglong/api/types/v1/BuilderProject.hpp"
 #include "linglong/api/types/v1/PackageInfoV2.hpp"
+#include "linglong/api/types/v1/Repo.hpp"
 #include "linglong/package/architecture.h"
 #include "linglong/package/version.h"
 
@@ -27,6 +29,8 @@ public:
     fromPackageInfo(const api::types::v1::PackageInfoV2 &info) noexcept;
     static QVariantMap toVariantMap(const Reference &ref) noexcept;
     static utils::error::Result<Reference> fromVariantMap(const QVariantMap &data) noexcept;
+    static utils::error::Result<Reference>
+    fromBuilderProject(const api::types::v1::BuilderProject &project) noexcept;
 
     QString channel;
     QString id;
@@ -44,10 +48,16 @@ private:
               const Architecture &architecture);
 };
 
+struct ReferenceWithRepo
+{
+    api::types::v1::Repo repo;
+    Reference reference;
+};
+
 } // namespace linglong::package
 
 // Note: declare here, so we can use std::unordered_map<Reference, ...> in other place
-template<>
+template <>
 struct std::hash<linglong::package::Reference>
 {
     size_t operator()(const linglong::package::Reference &ref) const noexcept

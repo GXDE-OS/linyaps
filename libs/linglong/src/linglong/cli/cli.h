@@ -9,12 +9,23 @@
 #include "linglong/api/dbus/v1/package_manager.h"
 #include "linglong/api/dbus/v1/task.h"
 #include "linglong/api/types/v1/CommonOptions.hpp"
+#include "linglong/api/types/v1/PackageInfoDisplay.hpp"
+#include "linglong/api/types/v1/RepositoryCacheLayersItem.hpp"
 #include "linglong/cli/interactive_notifier.h"
 #include "linglong/cli/printer.h"
 #include "linglong/repo/ostree_repo.h"
 #include "linglong/runtime/container_builder.h"
+#include "linglong/utils/error/error.h"
 
 #include <CLI/App.hpp>
+
+namespace linglong::runtime {
+class RunContext;
+}
+
+namespace linglong::generator {
+class ContainerCfgBuilder;
+}
 
 namespace linglong::cli {
 
@@ -38,6 +49,7 @@ struct CliOptions
     std::string instance;
     std::string module;
     std::string type;
+    std::optional<std::string> repo;
     RepoOptions repoOptions;
     std::vector<std::string> commands;
     bool showDevel;
@@ -47,6 +59,7 @@ struct CliOptions
     bool confirmOpt;
     std::optional<pid_t> pid;
     std::string signal;
+    bool verbose;
 };
 
 class Cli : public QObject
@@ -96,10 +109,14 @@ private:
     filePathMapping(const std::vector<std::string> &command) const noexcept;
     static std::string mappingFile(const std::filesystem::path &file) noexcept;
     static std::string mappingUrl(std::string_view url) noexcept;
-    static void filterPackageInfosFromType(std::vector<api::types::v1::PackageInfoV2> &list,
-                                           const std::string &type) noexcept;
-    static utils::error::Result<void>
-    filterPackageInfosFromVersion(std::vector<api::types::v1::PackageInfoV2> &list) noexcept;
+
+    static void filterPackageInfosByType(
+      std::map<std::string, std::vector<api::types::v1::PackageInfoV2>> &list,
+      const std::string &type) noexcept;
+    static void filterPackageInfosByType(std::vector<api::types::v1::PackageInfoDisplay> &list,
+                                         const std::string &type);
+    static utils::error::Result<void> filterPackageInfosByVersion(
+      std::map<std::string, std::vector<api::types::v1::PackageInfoV2>> &list) noexcept;
     void printProgress() noexcept;
     [[nodiscard]] utils::error::Result<std::vector<api::types::v1::CliContainer>>
     getCurrentContainers() const noexcept;
@@ -110,19 +127,22 @@ private:
     utils::error::Result<std::vector<api::types::v1::UpgradeListResult>>
     listUpgradable(const std::vector<api::types::v1::PackageInfoV2> &pkgs);
     utils::error::Result<std::vector<api::types::v1::UpgradeListResult>>
-    listUpgradable(const std::string &type);
+    listUpgradable(const std::string &type = "app");
     int generateCache(const package::Reference &ref);
-    utils::error::Result<std::string>
-    ensureCache(const package::Reference &ref,
-                const api::types::v1::RepositoryCacheLayersItem &appLayerItem) noexcept;
+    utils::error::Result<std::filesystem::path> ensureCache(
+      runtime::RunContext &runContext, const generator::ContainerCfgBuilder &cfgBuilder) noexcept;
     QDBusReply<QString> authorization();
     void updateAM() noexcept;
 
 private Q_SLOTS:
     // maybe use in the future
     void onTaskAdded(QDBusObjectPath object_path);
-    void onTaskRemoved(
-      QDBusObjectPath object_path, int state, int subState, QString message, double percentage);
+    void onTaskRemoved(QDBusObjectPath object_path,
+                       int state,
+                       int subState,
+                       QString message,
+                       double percentage,
+                       int code);
     void onTaskPropertiesChanged(QString interface,
                                  QVariantMap changed_properties,
                                  QStringList invalidated_properties);
@@ -144,6 +164,7 @@ private:
     linglong::api::types::v1::SubState lastSubState{ linglong::api::types::v1::SubState::Unknown };
     QString lastMessage;
     double lastPercentage{ 0 };
+    linglong::utils::error::ErrorCode lastErrorCode;
     linglong::cli::CliOptions options;
 };
 

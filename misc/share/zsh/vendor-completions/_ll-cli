@@ -12,6 +12,10 @@ __ll_cli_get_installed_list() {
     ll-cli list | tail -n+2 | awk '{print $1line}' || echo ""
 }
 
+__ll_cli_get_installed_app_list() {
+    ll-cli list --type=all | tail -n+2 | awk '{print $1line}' || echo ""
+}
+
 __ll_cli_get_app_list() {
     ll-cli search $1 | tail -n+2 | awk '{print $1}' || echo ""
 }
@@ -45,7 +49,7 @@ _ll-cli() {
 
     case "$line[1]" in
         run)
-            local installed_list=(${(f)"$(__ll_cli_get_installed_list)"})
+            local installed_list=(${(f)"$(__ll_cli_get_installed_app_list)"})
             local run_options=(
                 '--file:file:_files'
                 '--url:url:_urls'
@@ -94,23 +98,35 @@ _ll-cli() {
                 '-y'
             )
 
-            local search_target="."
-            if [[ -n "${cur}" ]]; then
-                search_target="${cur}"
+            # 判断是否是本地路径补全
+            local cur="${words[CURRENT]}"
+            if [[ "${cur}" == ./* ]]; then
+                _arguments \
+                    '1: :_files -g "*.layer" -g "*.uab"' \
+                    "${install_options[@]}" \
+                    "${command_options[@]}"
+            else
+                local search_target="."
+                if [[ -n "${cur}" ]]; then
+                    search_target="${cur}"
+                fi
+
+                local app_list=(${(f)"$(__ll_cli_get_app_list ${search_target})"})
+                if [[ ${#app_list[@]} -eq 0 ]]; then
+                    _message "no matching applications"
+                else
+                    _arguments \
+                        '1: :{_values "available applications" "${app_list[@]}"}' \
+                        "${install_options[@]}" \
+                        "${command_options[@]}"
+                fi
             fi
-
-            local app_list=(${(f)"$(__ll_cli_get_app_list ${search_target})"} ${(f)"$(__ll_cli_get_layer_list ${cur})"})
-
-            _arguments \
-                '1: :{_values "available applications" "${app_list[@]}"}' \
-                "${install_options[@]}" \
-                "${command_options[@]}"
             ;;
         uninstall)
             local uninstall_options=(
                 '--module[Specify the module to uninstall]'
             )
-            local installed_list=(${(f)"$(__ll_cli_get_installed_list)"})
+            local installed_list=(${(f)"$(__ll_cli_get_installed_app_list)"})
             if [[ ${#installed_list[@]} -gt 0 ]]; then
                 _arguments \
                     '1: :{_values "installed applications" "${installed_list[@]}"}' \
@@ -149,7 +165,7 @@ _ll-cli() {
             fi
             ;;
         content)
-            local installed_list=(${(f)"$(__ll_cli_get_installed_list)"})
+            local installed_list=(${(f)"$(__ll_cli_get_installed_app_list)"})
             if [[ ${#installed_list[@]} -gt 0 ]]; then
                 _arguments \
                     '1: :{_values "installed applications" "${installed_list[@]}"}' \
@@ -168,7 +184,7 @@ _ll-cli() {
                 "${command_options[@]}"
             ;;
         repo)
-            local -a repo_subcommands=(add remove update set-default show)
+            local -a repo_subcommands=(add remove update set-default show set-priority)
             local -a repo_options=(
                 '--alias:alias'
                 '-f'

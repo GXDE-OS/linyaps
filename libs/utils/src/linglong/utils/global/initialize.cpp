@@ -6,7 +6,7 @@
 
 #include "linglong/utils/global/initialize.h"
 
-#include "linglong/utils/configure.h"
+#include "configure.h"
 
 #include <qcoreapplication.h>
 #include <qloggingcategory.h>
@@ -37,9 +37,7 @@ void catchUnixSignals(std::initializer_list<int> quitSignals)
     for (auto sig : quitSignals)
         sigaddset(&blocking_mask, sig);
 
-    struct sigaction sa
-    {
-    };
+    struct sigaction sa{};
 
     sa.sa_handler = handler;
     sa.sa_mask = blocking_mask;

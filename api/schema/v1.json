@@ -348,6 +348,24 @@
             "channel": {
               "type": "string",
               "description": "channel of package"
+            },
+            "extension_of": {
+              "type": "string",
+              "description": "extension of whom"
+            },
+            "libs": {
+              "description": "extra ld search path",
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "env": {
+              "description": "Predefined environment variables when the extension is applied",
+              "type": "object",
+              "additionalProperties": {
+                "type": "string"
+              }
             }
           }
         },
@@ -626,6 +644,27 @@
         }
       }
     },
+    "PackageInfoDisplay": {
+      "title": "PackageInfoDisplay",
+      "description": "this is the each item output of ll-cli list --json",
+      "allOf": [
+        {
+          "$ref": "#/$defs/PackageInfoV2"
+        },
+        {
+          "type": "object",
+          "requested": [
+            "info"
+          ],
+          "properties": {
+            "install_time": {
+              "type": "integer",
+              "description": "package install time"
+            }
+          }
+        }
+      ]
+    },
     "PackageInfoV2": {
       "title": "PackageInfoV2",
       "description": "this is the each item output of ll-cli list --json",
@@ -711,6 +750,16 @@
         "compatible_version": {
           "type": "string",
           "description": "record linyaps package is compatible with linyaps component version"
+        },
+        "extensions": {
+          "type": "array",
+          "description": "description of extension",
+          "items": {
+            "$ref": "#/$defs/ExtensionDefine"
+          }
+        },
+        "ext_impl": {
+          "$ref": "#/$defs/ExtensionImpl"
         }
       }
     },
@@ -934,6 +983,10 @@
             }
           }
         },
+        "repo": {
+          "type": "string",
+          "description": "repo alias of package manager install parameters"
+        },
         "options": {
           "$ref": "#/$defs/CommonOptions"
         }
@@ -1008,12 +1061,20 @@
       "type": "object",
       "description": "package manager search parameters",
       "required": [
-        "id"
+        "id",
+        "repos"
       ],
       "properties": {
         "id": {
           "type": "string",
           "description": "id of package manager search"
+        },
+        "repos": {
+          "type": "array",
+          "description": "repo of package manager search",
+          "items": {
+            "type": "string"
+          }
         }
       }
     },
@@ -1025,6 +1086,9 @@
           "$ref": "#/$defs/CommonResult"
         }
       ],
+      "required": [
+        "id"
+      ],
       "properties": {
         "id": {
           "type": "string",
@@ -1033,6 +1097,27 @@
       }
     },
     "PackageManager1SearchResult": {
+      "type": "object",
+      "description": "result of package manager search",
+      "allOf": [
+        {
+          "$ref": "#/$defs/CommonResult"
+        }
+      ],
+      "properties": {
+        "packages": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/PackageInfoV2"
+            },
+            "description": "package info of package manager search"
+          }
+        }
+      }
+    },
+    "PackageManager1PruneResult": {
       "type": "object",
       "description": "result of package manager search",
       "allOf": [
@@ -1234,6 +1319,70 @@
           "type": "string"
         }
       }
+    },
+    "ExportDirs": {
+      "type": "object",
+      "required": [
+        "export-paths"
+      ],
+      "properties": {
+        "export-paths": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "description": "path to export"
+          }
+        }
+      }
+    },
+    "ExtensionDefine": {
+      "type": "object",
+      "required": [
+        "name",
+        "version",
+        "directory"
+      ],
+      "properties": {
+        "name": {
+          "description": "extension name",
+          "type": "string"
+        },
+        "version": {
+          "description": "extension version",
+          "type": "string"
+        },
+        "directory": {
+          "description": "where extension to be mount",
+          "type": "string"
+        },
+        "allow_env": {
+          "description": "the environment variables allow extension to modify",
+          "type": "object",
+          "additionalProperties": {
+            "description": "default environment variable",
+            "type": "string"
+          }
+        }
+      }
+    },
+    "ExtensionImpl": {
+      "type": "object",
+      "properties": {
+        "libs": {
+          "description": "extra ld search path",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "env": {
+          "description": "environment variables to set when extension effects",
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        }
+      }
     }
   },
   "type": "object",
@@ -1288,6 +1437,9 @@
     },
     "PackageManager1Package": {
       "$ref": "#/$defs/PackageManager1Package"
+    },
+    "PackageInfoDisplay": {
+      "$ref": "#/$defs/PackageInfoDisplay"
     },
     "PackageInfoV2": {
       "$ref": "#/$defs/PackageInfoV2"
@@ -1346,6 +1498,9 @@
     "PackageManager1SearchResult": {
       "$ref": "#/$defs/PackageManager1SearchResult"
     },
+    "PackageManager1PruneResult": {
+      "$ref": "#/$defs/PackageManager1PruneResult"
+    },
     "PackageManager1GetRepoInfoResult": {
       "$ref": "#/$defs/PackageManager1GetRepoInfoResult"
     },
@@ -1360,6 +1515,15 @@
     },
     "DialogHandShakePayload": {
       "$ref": "#/$defs/DialogHandShakePayload"
+    },
+    "ExportDirs": {
+      "$ref": "#/$defs/ExportDirs"
+    },
+    "ExtensionDefine": {
+      "$ref": "#/$defs/ExtensionDefine"
+    },
+    "ExtensionImpl": {
+      "$ref": "#/$defs/ExtensionImpl"
     }
   }
 }

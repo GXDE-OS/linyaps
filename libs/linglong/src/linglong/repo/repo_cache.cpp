@@ -6,8 +6,8 @@
 
 #include "repo_cache.h"
 
+#include "configure.h"
 #include "linglong/package/version.h"
-#include "linglong/utils/configure.h"
 #include "linglong/utils/packageinfo_handler.h"
 #include "linglong/utils/serialize/json.h"
 
@@ -60,7 +60,7 @@ RepoCache::create(const std::filesystem::path &cacheFile,
     repoCache->cache = std::move(result).value();
     if (repoCache->cache.version != enableMaker::cacheFileVersion
         || repoCache->cache.llVersion != LINGLONG_VERSION) {
-        std::cout << "The existing cache is outdated, rebuild cache..." << std::endl;
+        std::cerr << "The existing cache is outdated, rebuild cache..." << std::endl;
         auto ret = repoCache->rebuildCache(repoConfig, repo);
         if (!ret) {
             return LINGLONG_ERR(ret);
@@ -135,7 +135,7 @@ utils::error::Result<void> RepoCache::rebuildCache(const api::types::v1::RepoCon
 
     // FIXME: ll-cli may initialize repo, it can make states.json own by root
     if (getuid() == 0) {
-        qWarning() << "Rebuild the cache by root, skip to write data to states.json";
+        std::cerr << "Rebuild the cache by root, skip to write data to states.json";
         return LINGLONG_OK;
     }
 
@@ -313,7 +313,6 @@ utils::error::Result<void> RepoCache::writeToDisk()
     }
 
     auto dumpStatus = [](const std::filesystem::path &p, std::error_code &ec) {
-        LINGLONG_TRACE("dump status")
         auto status = std::filesystem::status(p, ec);
         if (ec) {
             return;

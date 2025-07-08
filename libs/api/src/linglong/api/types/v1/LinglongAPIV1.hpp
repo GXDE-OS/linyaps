@@ -28,12 +28,16 @@
 #include "linglong/api/types/v1/ContainerProcessStateInfo.hpp"
 #include "linglong/api/types/v1/DialogHandShakePayload.hpp"
 #include "linglong/api/types/v1/DialogMessage.hpp"
+#include "linglong/api/types/v1/ExportDirs.hpp"
+#include "linglong/api/types/v1/ExtensionDefine.hpp"
+#include "linglong/api/types/v1/ExtensionImpl.hpp"
 #include "linglong/api/types/v1/InspectResult.hpp"
 #include "linglong/api/types/v1/InteractionReply.hpp"
 #include "linglong/api/types/v1/InteractionRequest.hpp"
 #include "linglong/api/types/v1/LayerInfo.hpp"
 #include "linglong/api/types/v1/OciConfigurationPatch.hpp"
 #include "linglong/api/types/v1/PackageInfo.hpp"
+#include "linglong/api/types/v1/PackageInfoDisplay.hpp"
 #include "linglong/api/types/v1/PackageInfoV2.hpp"
 #include "linglong/api/types/v1/PackageManager1GetRepoInfoResult.hpp"
 #include "linglong/api/types/v1/PackageManager1InstallParameters.hpp"
@@ -41,6 +45,7 @@
 #include "linglong/api/types/v1/PackageManager1ModifyRepoParameters.hpp"
 #include "linglong/api/types/v1/PackageManager1Package.hpp"
 #include "linglong/api/types/v1/PackageManager1PackageTaskResult.hpp"
+#include "linglong/api/types/v1/PackageManager1PruneResult.hpp"
 #include "linglong/api/types/v1/PackageManager1RequestInteractionAdditionalMessage.hpp"
 #include "linglong/api/types/v1/PackageManager1SearchParameters.hpp"
 #include "linglong/api/types/v1/PackageManager1SearchResult.hpp"
@@ -93,6 +98,9 @@ std::optional<CommonResult> commonResult;
 std::optional<ContainerProcessStateInfo> containerProcessStateInfo;
 std::optional<DialogHandShakePayload> dialogHandShakePayload;
 std::optional<DialogMessage> dialogMessage;
+std::optional<ExportDirs> exportDirs;
+std::optional<ExtensionDefine> extensionDefine;
+std::optional<ExtensionImpl> extensionImpl;
 std::optional<InspectResult> inspectResult;
 std::optional<InteractionMessageType> interactionMessageType;
 std::optional<InteractionReply> interactionReply;
@@ -100,6 +108,7 @@ std::optional<InteractionRequest> interactionRequest;
 std::optional<LayerInfo> layerInfo;
 std::optional<OciConfigurationPatch> ociConfigurationPatch;
 std::optional<PackageInfo> packageInfo;
+std::optional<PackageInfoDisplay> packageInfoDisplay;
 std::optional<PackageInfoV2> packageInfoV2;
 std::optional<PackageManager1GetRepoInfoResult> packageManager1GetRepoInfoResult;
 std::optional<CommonResult> packageManager1InstallLayerFDResult;
@@ -109,6 +118,7 @@ std::optional<PackageManager1ModifyRepoParameters> packageManager1ModifyRepoPara
 std::optional<CommonResult> packageManager1ModifyRepoResult;
 std::optional<PackageManager1Package> packageManager1Package;
 std::optional<PackageManager1PackageTaskResult> packageManager1PackageTaskResult;
+std::optional<PackageManager1PruneResult> packageManager1PruneResult;
 std::optional<PackageManager1RequestInteractionAdditionalMessage> packageManager1RequestInteractionAdditionalMessage;
 std::optional<PackageManager1SearchParameters> packageManager1SearchParameters;
 std::optional<PackageManager1SearchResult> packageManager1SearchResult;

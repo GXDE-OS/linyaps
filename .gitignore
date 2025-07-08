@@ -25,3 +25,8 @@
 /debian/tmp/
 /debian/tmp/usr
 /obj-x86_64-linux-gnu
+<<<<<<< HEAD
+=======
+
+/linglong/
+>>>>>>> c7559ffe7c6b24faa6ffc3ab0a65304d0ab4921c

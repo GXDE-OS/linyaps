@@ -20,10 +20,10 @@
 namespace lightElf {
 
 constexpr std::size_t machine_type = sizeof(void *) == 8 ? 64 : 32;
-template<std::size_t Bit>
+template <std::size_t Bit>
 struct Elf_trait;
 
-template<>
+template <>
 struct Elf_trait<64> // NOLINT
 {
     using elf_header = Elf64_Ehdr;
@@ -31,7 +31,7 @@ struct Elf_trait<64> // NOLINT
     using section_header = Elf64_Shdr;
 };
 
-template<>
+template <>
 struct Elf_trait<32> // NOLINT
 {
     using elf_header = Elf32_Ehdr;
@@ -39,7 +39,7 @@ struct Elf_trait<32> // NOLINT
     using section_header = Elf32_Shdr;
 };
 
-template<std::size_t Bit>
+template <std::size_t Bit>
 class Elf
 {
 public:
@@ -117,7 +117,7 @@ public:
             shdrstrndx = shdr.sh_link;
         }
 
-        auto shdrstrtab = elfHeader.e_shoff + shdrstrndx * elfHeader.e_shentsize;
+        auto shdrstrtab = elfHeader.e_shoff + (shdrstrndx * elfHeader.e_shentsize);
         bytesRead = ::pread(fd, &shdr, section_size, shdrstrtab);
         if (bytesRead == -1) {
             throw std::runtime_error("failed to read section header string table of" + path.string()

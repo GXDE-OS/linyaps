@@ -6,16 +6,23 @@
 
 #pragma once
 
+#include "linglong/api/types/v1/PackageInfoV2.hpp"
+#include "linglong/cli/cli.h"
 #include "linglong/cli/printer.h"
 
 namespace linglong::cli {
 
 class JSONPrinter : public Printer
 {
+private:
+    void printPackages(const std::vector<api::types::v1::PackageInfoV2> &);
+
 public:
     void printErr(const utils::error::Error &) override;
     void printPackage(const api::types::v1::PackageInfoV2 &) override;
-    void printPackages(const std::vector<api::types::v1::PackageInfoV2> &) override;
+    void printPackages(const std::vector<api::types::v1::PackageInfoDisplay> &) override;
+    void
+      printSearchResult(std::map<std::string, std::vector<api::types::v1::PackageInfoV2>>) override;
     void printPruneResult(const std::vector<api::types::v1::PackageInfoV2> &) override;
     void printContainers(const std::vector<api::types::v1::CliContainer> &) override;
     void printReply(const api::types::v1::CommonResult &) override;
@@ -28,6 +35,7 @@ public:
     void printContent(const QStringList &desktopPaths) override;
     void printUpgradeList(std::vector<api::types::v1::UpgradeListResult> &) override;
     void printInspect(const api::types::v1::InspectResult &) override;
+    void printMessage(const QString &message) override;
 };
 
 } // namespace linglong::cli

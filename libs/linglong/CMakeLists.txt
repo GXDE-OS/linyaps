@@ -35,9 +35,23 @@ pfl_add_library(
   src/linglong/cli/printer.h
   src/linglong/cli/terminal_notifier.cpp
   src/linglong/cli/terminal_notifier.h
+  src/linglong/common/dbus/properties_forwarder.cpp
+  src/linglong/common/dbus/properties_forwarder.h
+  src/linglong/common/dbus/register.cpp
+  src/linglong/common/dbus/register.h
+  src/linglong/common/formatter.cpp
+  src/linglong/common/formatter.h
+  src/linglong/common/gkeyfile_wrapper.h
+  src/linglong/common/global/initialize.cpp
+  src/linglong/common/global/initialize.h
+  src/linglong/common/serialize/json.cpp
+  src/linglong/common/serialize/json.h
   src/linglong/extension/extension.cpp
+  src/linglong/extension/extension.h
   src/linglong/package/architecture.cpp
   src/linglong/package/architecture.h
+  src/linglong/package/elf_handler.cpp
+  src/linglong/package/elf_handler.h
   src/linglong/package/fallback_version.cpp
   src/linglong/package/fallback_version.h
   src/linglong/package/fuzzy_reference.cpp
@@ -48,10 +62,22 @@ pfl_add_library(
   src/linglong/package/layer_file.h
   src/linglong/package/layer_packager.cpp
   src/linglong/package/layer_packager.h
+  src/linglong/package_manager/action.cpp
+  src/linglong/package_manager/action.h
+  src/linglong/package_manager/data_monitor.cpp
+  src/linglong/package_manager/data_monitor.h
   src/linglong/package_manager/package_manager.cpp
   src/linglong/package_manager/package_manager.h
   src/linglong/package_manager/package_task.cpp
   src/linglong/package_manager/package_task.h
+  src/linglong/package_manager/package_update.cpp
+  src/linglong/package_manager/package_update.h
+  src/linglong/package_manager/ref_installation.cpp
+  src/linglong/package_manager/ref_installation.h
+  src/linglong/package_manager/task.cpp
+  src/linglong/package_manager/task.h
+  src/linglong/package_manager/uab_installation.cpp
+  src/linglong/package_manager/uab_installation.h
   src/linglong/package/reference.cpp
   src/linglong/package/reference.h
   src/linglong/package/semver.hpp
@@ -73,6 +99,8 @@ pfl_add_library(
   src/linglong/repo/migrate.h
   src/linglong/repo/ostree_repo.cpp
   src/linglong/repo/ostree_repo.h
+  src/linglong/repo/remote_packages.cpp
+  src/linglong/repo/remote_packages.h
   src/linglong/repo/repo_cache.cpp
   src/linglong/repo/repo_cache.h
   src/linglong/runtime/container_builder.cpp
@@ -81,6 +109,8 @@ pfl_add_library(
   src/linglong/runtime/container.h
   src/linglong/runtime/run_context.cpp
   src/linglong/runtime/run_context.h
+  src/linglong/runtime/security_context.cpp
+  src/linglong/runtime/security_context.h
   TESTS
   ll-tests
   COMPILE_FEATURES
@@ -93,6 +123,7 @@ pfl_add_library(
   linglong::dbus-api
   linglong::utils
   linglong::api
+  PkgConfig::glib2
   PkgConfig::ostree1
   PkgConfig::systemd
   PkgConfig::ELF
@@ -103,7 +134,55 @@ pfl_add_library(
   tl::expected
   linglong::oci-cfg-generators
   CLI11::CLI11
-  ${YAML_CPP})
+  ${YAML_CPP}
+  PkgConfig::uuid)
+
+if(LINGLONG_ENABLE_WAYLAND_SEC_CTX_SUPPORT)
+  # pkg_get_variable() cannot reliably get variables in a .pc file if those
+  # variables contain placeholders/macros (like ${pc_sysrootdir}) that CMake
+  # cannot expand.
+  execute_process(
+    COMMAND pkg-config --variable=pkgdatadir wayland-protocols
+    OUTPUT_VARIABLE WAYLAND_PROTOCOLS_DATA_DIR
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    RESULT_VARIABLE PKG_CONFIG_RESULT)
+
+  if(NOT PKG_CONFIG_RESULT EQUAL 0)
+    message(FATAL_ERROR "Failed to get pkgdatadir from wayland-protocols")
+  endif()
+
+  set(WAYLAND_SECURITY_CONTEXT_XML
+      ${WAYLAND_PROTOCOLS_DATA_DIR}/staging/security-context/security-context-v1.xml
+  )
+  set(WAYLAND_GENERATED_DIR ${CMAKE_CURRENT_BINARY_DIR}/wayland)
+  set(WAYLAND_SECURITY_CONTEXT_HEADER
+      ${WAYLAND_GENERATED_DIR}/wayland-security-context-v1.h)
+  set(WAYLAND_SECURITY_CONTEXT_GENERATED_FILES
+      ${WAYLAND_GENERATED_DIR}/wayland-security-context-v1.c)
+
+  add_custom_command(
+    OUTPUT ${WAYLAND_SECURITY_CONTEXT_HEADER}
+    COMMAND ${WAYLAND_SCANNER} client-header ${WAYLAND_SECURITY_CONTEXT_XML}
+            ${WAYLAND_SECURITY_CONTEXT_HEADER}
+    DEPENDS ${WAYLAND_SECURITY_CONTEXT_XML})
+
+  add_custom_command(
+    OUTPUT ${WAYLAND_SECURITY_CONTEXT_GENERATED_FILES}
+    COMMAND ${WAYLAND_SCANNER} private-code ${WAYLAND_SECURITY_CONTEXT_XML}
+            ${WAYLAND_SECURITY_CONTEXT_GENERATED_FILES}
+    DEPENDS ${WAYLAND_SECURITY_CONTEXT_XML})
+
+  get_real_target_name(target linglong::linglong)
+  target_include_directories(${target} PRIVATE ${WAYLAND_GENERATED_DIR})
+  target_sources(
+    ${target}
+    PRIVATE
+      ${WAYLAND_SECURITY_CONTEXT_GENERATED_FILES}
+      ${CMAKE_CURRENT_LIST_DIR}/src/linglong/runtime/wayland_security_ctx.cpp
+      ${CMAKE_CURRENT_LIST_DIR}/src/linglong/runtime/wayland_security_ctx.h)
+  target_link_libraries(${target} PUBLIC PkgConfig::WAYLAND_CLIENT)
+  target_compile_options(${target} PRIVATE -DWAYLAND_SEC_CTX_SUPPORT)
+endif()
 
 function(
   linglong_add_dbus_adaptor
@@ -115,20 +194,10 @@ function(
   classname)
   get_real_target_name(target ${target})
 
-  set(DBUS_ADAPTOR_SOURCE)
-
   if("${QT_VERSION_MAJOR}" STREQUAL "6")
-    qt6_add_dbus_adaptor_override(
-      qdbusxml2cpp
-      DBUS_ADAPTOR_SOURCE
-      ${xml}
-      ${includes}
-      ${parent_class}
-      ${basename}
-      ${classname})
+    qt6_add_dbus_adaptor(DBUS_ADAPTOR_SOURCE ${xml} ${includes} ${parent_class}
+                         ${basename} ${classname})
   else()
-    set(Qt5DBus_QDBUSXML2CPP_EXECUTABLE qdbusxml2cpp) # this varible only exists
-                                                      # in qt5
     qt5_add_dbus_adaptor(DBUS_ADAPTOR_SOURCE ${xml} ${includes} ${parent_class}
                          ${basename} ${classname})
   endif()

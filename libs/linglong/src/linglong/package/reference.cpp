@@ -6,13 +6,17 @@
 
 #include "linglong/package/reference.h"
 
-#include <qregularexpression.h>
+#include <fmt/format.h>
 
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QRegularExpression>
 #include <QStringList>
+#include <QVariantMap>
 
 namespace linglong::package {
 
-utils::error::Result<Reference> Reference::parse(const QString &raw) noexcept
+utils::error::Result<Reference> Reference::parse(const std::string &raw) noexcept
 {
     LINGLONG_TRACE("parse reference string");
 
@@ -23,14 +27,14 @@ utils::error::Result<Reference> Reference::parse(const QString &raw) noexcept
         return referenceRegExp;
     }();
 
-    auto matches = referenceRegExp.match(raw);
+    auto matches = referenceRegExp.match(QString::fromStdString(raw));
     if (not(matches.isValid() and matches.hasMatch())) {
         return LINGLONG_ERR("regexp mismatched.", -1);
     }
 
     auto channel = matches.captured("channel");
     auto id = matches.captured("id");
-    auto versionStr = matches.captured("version");
+    auto versionStr = matches.captured("version").toStdString();
     auto architectureStr = matches.captured("architecture");
 
     auto version = Version::parse(versionStr);
@@ -43,7 +47,7 @@ utils::error::Result<Reference> Reference::parse(const QString &raw) noexcept
         return LINGLONG_ERR(arch);
     }
 
-    auto reference = create(channel, id, *version, *arch);
+    auto reference = create(channel.toStdString(), id.toStdString(), *version, *arch);
     if (!reference) {
         return LINGLONG_ERR(reference);
     }
@@ -56,7 +60,7 @@ Reference::fromPackageInfo(const api::types::v1::PackageInfoV2 &info) noexcept
 {
     LINGLONG_TRACE("parse reference from package info");
 
-    auto version = package::Version::parse(QString::fromStdString(info.version));
+    auto version = package::Version::parse(info.version);
     if (!version) {
         return LINGLONG_ERR(version);
     }
@@ -69,10 +73,7 @@ Reference::fromPackageInfo(const api::types::v1::PackageInfoV2 &info) noexcept
         return LINGLONG_ERR(architecture);
     }
 
-    auto reference = package::Reference::create(QString::fromStdString(info.channel),
-                                                QString::fromStdString(info.id),
-                                                *version,
-                                                *architecture);
+    auto reference = package::Reference::create(info.channel, info.id, *version, *architecture);
     if (!reference) {
         return LINGLONG_ERR(reference);
     }
@@ -80,8 +81,8 @@ Reference::fromPackageInfo(const api::types::v1::PackageInfoV2 &info) noexcept
     return reference;
 }
 
-utils::error::Result<Reference> Reference::create(const QString &channel,
-                                                  const QString &id,
+utils::error::Result<Reference> Reference::create(const std::string &channel,
+                                                  const std::string &id,
                                                   const Version &version,
                                                   const Architecture &arch) noexcept
 try {
@@ -91,8 +92,8 @@ try {
     return LINGLONG_ERR("invalid reference", e);
 }
 
-Reference::Reference(const QString &channel,
-                     const QString &id,
+Reference::Reference(const std::string &channel,
+                     const std::string &id,
                      const Version &version,
                      const Architecture &arch)
     : channel(channel)
@@ -100,17 +101,17 @@ Reference::Reference(const QString &channel,
     , version(version)
     , arch(arch)
 {
-    if (channel.isEmpty()) {
+    if (channel.empty()) {
         throw std::runtime_error("empty channel");
     }
-    if (id.isEmpty()) {
+    if (id.empty()) {
         throw std::runtime_error("empty id");
     }
 }
 
-QString Reference::toString() const noexcept
+std::string Reference::toString() const noexcept
 {
-    return QString("%1:%2/%3/%4").arg(channel, id, version.toString(), arch.toString());
+    return fmt::format("{}:{}/{}/{}", channel, id, version.toString(), arch.toString());
 }
 
 bool operator!=(const Reference &lhs, const Reference &rhs) noexcept
@@ -124,80 +125,29 @@ bool operator==(const Reference &lhs, const Reference &rhs) noexcept
     return !(lhs != rhs);
 }
 
-QVariantMap Reference::toVariantMap(const Reference &ref) noexcept
-{
-    nlohmann::json json;
-    json["channel"] = ref.channel.toStdString();
-    json["id"] = ref.id.toStdString();
-    json["version"] = ref.version.toString().toStdString();
-    json["arch"] = ref.arch.toString().toStdString();
-
-    QJsonDocument doc = QJsonDocument::fromJson(json.dump().data());
-    Q_ASSERT(doc.isObject());
-    return doc.object().toVariantMap();
-}
-
-utils::error::Result<Reference> Reference::fromVariantMap(const QVariantMap &data) noexcept
-{
-    LINGLONG_TRACE("parse reference VariantMap");
-
-    QJsonDocument doc(QJsonObject::fromVariantMap(data));
-    nlohmann::json json;
-    try {
-        json = nlohmann::json::parse(doc.toJson().constData());
-    } catch (const std::exception &e) {
-        return LINGLONG_ERR("parse json failed", e);
-    }
-
-    auto channel = json["channel"];
-    auto id = json["id"];
-    auto rawVersion = json["version"];
-    auto rawArch = json["arch"];
-
-    auto version = Version::parse(QString::fromStdString(rawVersion));
-    if (!version) {
-        return LINGLONG_ERR(version);
-    }
-
-    auto arch = Architecture::parse(rawArch);
-    if (!arch) {
-        return LINGLONG_ERR(arch);
-    }
-
-    auto reference =
-      create(QString::fromStdString(channel), QString::fromStdString(id), *version, *arch);
-    if (!reference) {
-        return LINGLONG_ERR(reference);
-    }
-
-    return *reference;
-}
-
 utils::error::Result<Reference>
 Reference::fromBuilderProject(const api::types::v1::BuilderProject &project) noexcept
 {
     LINGLONG_TRACE("parse reference from BuilderProject");
 
-    auto version = package::Version::parse(QString::fromStdString(project.package.version));
+    auto version = package::Version::parse(project.package.version);
     if (!version) {
         return LINGLONG_ERR(version);
     }
 
     auto architecture = package::Architecture::currentCPUArchitecture();
     if (project.package.architecture) {
-        architecture = package::Architecture::parse(*project.package.architecture);
-    }
-    if (!architecture) {
-        return LINGLONG_ERR(architecture);
+        auto targetArch = package::Architecture::parse(*project.package.architecture);
+        if (!targetArch) {
+            return LINGLONG_ERR(targetArch);
+        }
+        architecture = *targetArch;
     }
     std::string channel = "main";
     if (project.package.channel.has_value()) {
         channel = *project.package.channel;
     }
-    auto ref = package::Reference::create(QString::fromStdString(channel),
-                                          QString::fromStdString(project.package.id),
-                                          *version,
-                                          *architecture);
+    auto ref = package::Reference::create(channel, project.package.id, *version, architecture);
     if (!ref) {
         return LINGLONG_ERR(ref);
     }

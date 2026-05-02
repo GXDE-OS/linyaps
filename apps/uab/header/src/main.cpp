@@ -9,12 +9,12 @@
 
 #include <gelf.h>
 #include <getopt.h>
-#include <linux/limits.h>
 #include <nlohmann/json.hpp>
 #include <sys/mount.h>
 
 #include <array>
 #include <atomic>
+#include <climits>
 #include <cstring>
 #include <filesystem>
 #include <iomanip>
@@ -46,6 +46,7 @@ uabBundle [uabOptions...] [-- loaderOptions...]
 
 Options:
     --extract=PATH extract the read-only filesystem image which is in the 'linglong.bundle' segment of uab to PATH. [exclusive]
+    --mount=PATH mount the read-only filesystem image which is in the 'linglong.bundle' segment of uab to PATH, use ctrl+c to stop. [exclusive]
     --print-meta print content of json which from the 'linglong.meta' segment of uab to STDOUT [exclusive]
     --help print usage of uab [exclusive]
 )";
@@ -53,6 +54,7 @@ Options:
 enum uabOption : std::uint8_t {
     Help = 1,
     Extract,
+    Mount,
     Meta,
 };
 
@@ -61,6 +63,7 @@ struct argOption
     bool help{ false };
     bool printMeta{ false };
     std::string extractPath;
+    std::string mountPath;
     std::vector<std::string_view> loaderArgs;
 };
 
@@ -280,7 +283,7 @@ int mountSelfBundle(const lightElf::native_elf &elf,
             }
         }
 
-        return erofsfuse_main(4, const_cast<char **>(erofs_argv.data()));
+        _exit(erofsfuse_main(4, const_cast<char **>(erofs_argv.data())));
     }
 
     int status{ 0 };
@@ -460,7 +463,7 @@ int extractBundle(std::string_view destination) noexcept
     return 0;
 }
 
-int runAppLoader(bool onlyApp, const std::vector<std::string_view> &loaderArgs) noexcept
+int runAppLoader(const std::vector<std::string_view> &loaderArgs) noexcept
 {
     auto loader = mountPoint / "loader";
     std::error_code ec;
@@ -498,7 +501,7 @@ int runAppLoader(bool onlyApp, const std::vector<std::string_view> &loaderArgs) 
     }
 
     if (loaderPid == 0) {
-        if (onlyApp && ::setenv("LINGLONG_UAB_LOADER_ONLY_APP", "true", 1) < 0) {
+        if (::setenv("LINGLONG_UAB_LOADER_ONLY_APP", "true", 1) < 0) {
             std::cerr << "setenv error: " << ::strerror(errno) << std::endl;
             return errno;
         }
@@ -543,9 +546,10 @@ argOption parseArgs(const std::vector<std::string_view> &args)
         opts.loaderArgs.assign(splitter + 1, args.cend());
     }
 
-    std::array<struct option, 4> long_options{
+    std::array<struct option, 5> long_options{
         { { "print-meta", no_argument, nullptr, uabOption::Meta },
           { "extract", required_argument, nullptr, uabOption::Extract },
+          { "mount", required_argument, nullptr, uabOption::Mount },
           { "help", no_argument, nullptr, uabOption::Help },
           { nullptr, 0, nullptr, 0 } }
     };
@@ -572,6 +576,10 @@ argOption parseArgs(const std::vector<std::string_view> &args)
             opts.extractPath = optarg;
             ++counter;
         } break;
+        case uabOption::Mount: {
+            opts.mountPath = optarg;
+            ++counter;
+        } break;
         case uabOption::Help: {
             opts.help = true;
             ++counter;
@@ -592,16 +600,31 @@ argOption parseArgs(const std::vector<std::string_view> &args)
 }
 
 int mountSelf(const lightElf::native_elf &elf,
-              const linglong::api::types::v1::UabMetaInfo &metaInfo) noexcept
+              const linglong::api::types::v1::UabMetaInfo &metaInfo,
+              const std::filesystem::path &mp = {}) noexcept
 {
     if (mountFlag.load(std::memory_order_relaxed)) {
         std::cout << "bundle already has been mounted" << std::endl;
         return 0;
     }
 
-    const auto &uuid = metaInfo.uuid;
-    if (auto ret = createMountPoint(uuid); ret != 0) {
-        return ret;
+    if (mp.empty()) {
+        const auto &uuid = metaInfo.uuid;
+        if (auto ret = createMountPoint(uuid); ret != 0) {
+            return ret;
+        }
+    } else {
+        std::error_code ec;
+        auto state = std::filesystem::status(mp, ec);
+        if (ec) {
+            std::cerr << "failed to status " + mp.string() + ": " + ec.message() << std::endl;
+            return -1;
+        }
+        if (!std::filesystem::is_directory(state)) {
+            std::cerr << mp.string() << "is not a directory" << std::endl;
+            return -1;
+        }
+        mountPoint = mp;
     }
 
     if (auto ret = mountSelfBundle(elf, metaInfo); ret != 0) {
@@ -655,42 +678,48 @@ int main(int argc, char **argv)
         std::abort();
     });
 
-    if (!opts.extractPath.empty()) {
-        if (auto ret = mountSelf(elf, metaInfo); ret != 0) {
-            return ret;
-        }
-
-        return extractBundle(opts.extractPath);
-    }
-
-    if (auto ret = mountSelf(elf, metaInfo); ret != 0) {
+    if (auto ret = mountSelf(elf, metaInfo, opts.mountPath); ret != 0) {
         return ret;
     }
 
-    bool onlyApp = metaInfo.onlyApp.value_or(false);
-    if (onlyApp) {
-        std::string appID;
-        std::string module;
-        for (const auto &layer : metaInfo.layers) {
-            if (layer.info.kind == "app") {
-                appID = layer.info.id;
-                module = layer.info.packageInfoV2Module;
-                break;
-            }
-        }
-
-        if (appID.empty() || module.empty()) {
-            std::cerr << "failed to find appID and module" << std::endl;
-            return 1;
-        }
-
-        std::string envAppRoot =
-          std::string(mountPoint) + "/layers/" + appID + "/" + module + "/files";
-        if (::setenv("LINGLONG_UAB_APPROOT", const_cast<char *>(envAppRoot.data()), 1) == -1) {
-            std::cerr << "setenv error: " << ::strerror(errno) << std::endl;
-            return 1;
+    bool mountOnly = !opts.mountPath.empty();
+    if (mountOnly) {
+        while (true) {
+            pause();
         }
     }
 
-    return runAppLoader(onlyApp, opts.loaderArgs);
+    if (!opts.extractPath.empty()) {
+        return extractBundle(opts.extractPath);
+    }
+
+    const bool onlyApp = metaInfo.onlyApp.value_or(false);
+
+    if (!onlyApp) {
+        std::cout << "This UAB is not support for runnning" << std::endl;
+        return 0;
+    }
+
+    std::string appID;
+    std::string module;
+    for (const auto &layer : metaInfo.layers) {
+        if (layer.info.kind == "app") {
+            appID = layer.info.id;
+            module = layer.info.packageInfoV2Module;
+            break;
+        }
+    }
+
+    if (appID.empty() || module.empty()) {
+        std::cerr << "failed to find appID and module" << std::endl;
+        return 1;
+    }
+
+    std::string envAppRoot = std::string(mountPoint) + "/layers/" + appID + "/" + module + "/files";
+    if (::setenv("LINGLONG_UAB_APPROOT", const_cast<char *>(envAppRoot.data()), 1) == -1) {
+        std::cerr << "setenv error: " << ::strerror(errno) << std::endl;
+        return 1;
+    }
+
+    return runAppLoader(opts.loaderArgs);
 }

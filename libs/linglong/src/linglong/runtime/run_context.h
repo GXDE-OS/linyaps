@@ -11,6 +11,7 @@
 #include "linglong/api/types/v1/ExtensionDefine.hpp"
 #include "linglong/oci-cfg-generators/container_cfg_builder.h"
 #include "linglong/repo/ostree_repo.h"
+#include "linglong/runtime/security_context.h"
 #include "linglong/utils/error/error.h"
 
 #include <filesystem>
@@ -23,16 +24,17 @@ class RunContext;
 class RuntimeLayer
 {
 public:
-    RuntimeLayer(package::Reference ref, RunContext &context);
+    static utils::error::Result<RuntimeLayer> create(package::Reference ref, RunContext &context);
     ~RuntimeLayer();
 
     using ExtensionRuntimeLayerInfo =
       std::pair<api::types::v1::ExtensionDefine, std::reference_wrapper<RuntimeLayer>>;
 
-    utils::error::Result<void> resolveLayer(
-      const QStringList &modules = {}, const std::optional<std::string> &subRef = std::nullopt);
+    utils::error::Result<void>
+    resolveLayer(const std::vector<std::string> &modules = {},
+                 const std::optional<std::string> &subRef = std::nullopt);
 
-    utils::error::Result<api::types::v1::RepositoryCacheLayersItem> getCachedItem();
+    const api::types::v1::RepositoryCacheLayersItem &getCachedItem() const { return cachedItem; }
 
     const package::Reference &getReference() const { return reference; }
 
@@ -43,12 +45,25 @@ public:
     const std::optional<ExtensionRuntimeLayerInfo> &getExtensionInfo() const { return extensionOf; }
 
 private:
+    RuntimeLayer(package::Reference ref, RunContext &context);
+
     package::Reference reference;
     std::reference_wrapper<RunContext> runContext;
     std::optional<package::LayerDir> layerDir;
-    std::optional<api::types::v1::RepositoryCacheLayersItem> cachedItem;
+    api::types::v1::RepositoryCacheLayersItem cachedItem;
     bool temporary;
     std::optional<ExtensionRuntimeLayerInfo> extensionOf;
+};
+
+struct ResolveOptions
+{
+    bool depsBinaryOnly{ false };
+    std::optional<std::vector<std::string>> appModules;
+    std::optional<std::string> baseRef;
+    std::optional<std::string> runtimeRef;
+    std::optional<std::vector<std::string>> extensionRefs;
+    std::optional<std::map<std::string, std::vector<api::types::v1::ExtensionDefine>>>
+      externalExtensionDefs;
 };
 
 class RunContext
@@ -62,12 +77,13 @@ public:
     ~RunContext();
 
     utils::error::Result<void> resolve(const linglong::package::Reference &runnable,
-                                       bool depsBinaryOnly = false,
-                                       const QStringList &appModules = {});
-    utils::error::Result<void> resolve(const api::types::v1::BuilderProject &target,
-                                       std::filesystem::path buildOutput);
+                                       const ResolveOptions &opts = ResolveOptions{});
 
-    utils::error::Result<void> fillContextCfg(generator::ContainerCfgBuilder &builder);
+    utils::error::Result<void> resolve(const api::types::v1::BuilderProject &target,
+                                       const std::filesystem::path &buildOutput);
+
+    utils::error::Result<void> fillContextCfg(generator::ContainerCfgBuilder &builder,
+                                              const std::string &bundleSuffix = "");
     api::types::v1::ContainerProcessStateInfo stateInfo();
 
     repo::OSTreeRepo &getRepo() const { return repo; }
@@ -77,6 +93,8 @@ public:
     const std::optional<RuntimeLayer> &getBaseLayer() const { return baseLayer; }
 
     const std::optional<RuntimeLayer> &getRuntimeLayer() const { return runtimeLayer; }
+
+    void enableSecurityContext(const std::vector<SecurityContextType> &ctxs);
 
     const std::optional<RuntimeLayer> &getAppLayer() const { return appLayer; }
 
@@ -88,12 +106,26 @@ public:
     bool hasRuntime() const { return !!runtimeLayer; }
 
 private:
-    utils::error::Result<void> resolveLayer(bool depsBinaryOnly, const QStringList &appModules);
-    utils::error::Result<void> resolveExtension(RuntimeLayer &layer);
+    utils::error::Result<void> resolveLayer(bool depsBinaryOnly,
+                                            const std::vector<std::string> &appModules);
+    utils::error::Result<void>
+    resolveExtension(RuntimeLayer &layer,
+                     const std::vector<api::types::v1::ExtensionDefine> &externalExtensionDefs);
+    utils::error::Result<void>
+    resolveExtension(const std::vector<api::types::v1::ExtensionDefine> &extDefs,
+                     std::optional<std::string> channel = std::nullopt,
+                     bool skipOnNotFound = false);
     utils::error::Result<void> fillExtraAppMounts(generator::ContainerCfgBuilder &builder);
+    void detectDisplaySystem(generator::ContainerCfgBuilder &builder) noexcept;
+    utils::error::Result<std::vector<api::types::v1::ExtensionDefine>>
+    makeManualExtensionDefine(const std::vector<std::string> &refs);
+    std::vector<api::types::v1::ExtensionDefine> matchedExtensionDefines(
+      const package::Reference &ref,
+      const std::optional<std::map<std::string, std::vector<api::types::v1::ExtensionDefine>>>
+        &externalExtensionDefs);
 
     repo::OSTreeRepo &repo;
-
+    std::unordered_map<SecurityContextType, std::unique_ptr<SecurityContext>> securityContexts;
     std::optional<RuntimeLayer> baseLayer;
     std::optional<RuntimeLayer> runtimeLayer;
     std::optional<RuntimeLayer> appLayer;

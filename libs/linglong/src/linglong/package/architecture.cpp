@@ -6,6 +6,8 @@
 
 #include "linglong/package/architecture.h"
 
+#include "linglong/utils/log/log.h"
+
 #include <elf.h>
 
 #include <QSysInfo>
@@ -21,7 +23,7 @@ Architecture::Architecture(Value value)
 {
 }
 
-QString Architecture::toString() const noexcept
+std::string Architecture::toString() const noexcept
 {
     switch (this->v) {
     case X86_64:
@@ -36,18 +38,20 @@ QString Architecture::toString() const noexcept
         return "sw64";
     case MIPS64:
         return "mips64";
+    case RISCV64:
+        return "riscv64";
     case UNKNOW:
         [[fallthrough]];
     default:
-        return "unknow";
+        return "unknown";
     }
 }
 
-QString Architecture::getTriplet() const noexcept
+std::string Architecture::getTriplet() const noexcept
 {
     switch (this->v) {
     case UNKNOW:
-        return "unknow";
+        return "unknown";
     case X86_64:
         return "x86_64-linux-gnu";
     case ARM64:
@@ -60,8 +64,10 @@ QString Architecture::getTriplet() const noexcept
         return "loongarch64-linux-gnu";
     case MIPS64:
         return "mips64el-linux-gnuabi64";
+    case RISCV64:
+        return "riscv64-linux-gnu";
     }
-    return "unknow";
+    return "unknown";
 }
 
 utils::error::Result<Architecture> Architecture::parse(const std::string &raw) noexcept
@@ -99,6 +105,10 @@ Architecture::Architecture(const std::string &raw)
             return MIPS64;
         }
 
+        if (raw == "riscv64") {
+            return RISCV64;
+        }
+
         throw std::runtime_error("unknow architecture");
     }())
 {
@@ -115,7 +125,7 @@ bool isNewWorldLoongArch()
     // 打开可执行文件
     std::ifstream file("/proc/self/exe", std::ios::binary);
     if (!file) {
-        qCritical() << "Failed to open executable file";
+        LogE("Failed to open executable file");
         isLoongArch = false;
         return false;
     }
@@ -124,7 +134,7 @@ bool isNewWorldLoongArch()
     Elf64_Ehdr ehdr;
     file.read(reinterpret_cast<char *>(&ehdr), sizeof(ehdr));
     if (!file || std::memcmp(ehdr.e_ident, ELFMAG, SELFMAG) != 0) {
-        qCritical() << "Not a valid ELF file.";
+        LogE("Not a valid ELF file.");
         isLoongArch = false;
         return false;
     }
@@ -135,23 +145,28 @@ bool isNewWorldLoongArch()
 }
 } // namespace
 
-utils::error::Result<Architecture> Architecture::currentCPUArchitecture() noexcept
+const Architecture &Architecture::currentCPUArchitecture()
 {
-    auto arch = QSysInfo::currentCpuArchitecture().toStdString();
+    auto currentArch = []() {
+        auto arch = QSysInfo::currentCpuArchitecture().toStdString();
 
-    if (arch == "sw_64") {
-        arch = "sw64";
-    }
-
-    if (arch == "loongarch64" || arch == "loong64") {
-        if (isNewWorldLoongArch()) {
-            arch = "loong64";
-        } else {
-            arch = "loongarch64";
+        if (arch == "sw_64") {
+            arch = "sw64";
         }
-    }
 
-    return Architecture::parse(arch);
-};
+        if (arch == "loongarch64" || arch == "loong64") {
+            if (isNewWorldLoongArch()) {
+                arch = "loong64";
+            } else {
+                arch = "loongarch64";
+            }
+        }
+        return arch;
+    };
+
+    // throw exception if architecture is unknown
+    static Architecture arch(currentArch());
+    return arch;
+}
 
 } // namespace linglong::package

@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2022 UnionTech Software Technology Co., Ltd.
+ * SPDX-FileCopyrightText: 2022 - 2025 UnionTech Software Technology Co., Ltd.
  *
  * SPDX-License-Identifier: LGPL-3.0-or-later
  */
@@ -7,18 +7,20 @@
 #include "linglong/runtime/container.h"
 
 #include "configure.h"
-#include "linglong/utils/bash_quote.h"
+#include "linglong/common/dir.h"
+#include "linglong/utils/bash_command_helper.h"
+#include "linglong/utils/file.h"
 #include "linglong/utils/finally/finally.h"
+#include "linglong/utils/log/log.h"
 #include "ocppi/runtime/RunOption.hpp"
 #include "ocppi/runtime/config/types/Generators.hpp"
 
-#include <QDir>
-#include <QStandardPaths>
+#include <fmt/format.h>
 
+#include <cassert>
 #include <fstream>
 #include <utility>
 
-#include <sys/stat.h>
 #include <unistd.h>
 
 namespace {
@@ -70,8 +72,7 @@ void mergeProcessConfig(ocppi::runtime::config::types::Process &dst,
                   });
 
                 if (it != dstEnv.end()) {
-                    qWarning() << "environment set multiple times " << QString::fromStdString(*it)
-                               << QString::fromStdString(env);
+                    LogW("environment set multiple times {} {}", *it, env);
                     *it = env;
                 } else {
                     dstEnv.emplace_back(env);
@@ -117,61 +118,58 @@ void mergeProcessConfig(ocppi::runtime::config::types::Process &dst,
 namespace linglong::runtime {
 
 Container::Container(ocppi::runtime::config::types::Config cfg,
-                     QString appID,
-                     QString conatinerID,
+                     std::string containerId,
+                     std::filesystem::path bundleDir,
                      ocppi::cli::CLI &cli)
     : cfg(std::move(cfg))
-    , id(std::move(conatinerID))
-    , appID(std::move(appID))
+    , id(std::move(containerId))
+    , bundleDir(std::move(bundleDir))
     , cli(cli)
 {
-    Q_ASSERT(cfg.process.has_value());
+    assert(cfg.process.has_value());
 }
 
 utils::error::Result<void> Container::run(const ocppi::runtime::config::types::Process &process,
                                           ocppi::runtime::RunOption &opt) noexcept
 {
-    LINGLONG_TRACE(QString("run container %1").arg(this->id));
+    LINGLONG_TRACE(fmt::format("run container {}", this->id));
 
-    std::error_code ec;
-    std::filesystem::path runtimeDir =
-      QStandardPaths::writableLocation(QStandardPaths::RuntimeLocation).toStdString();
+    auto _ = utils::finally::finally([&]() {
+        std::error_code ec;
+        while (getenv("LINGLONG_DEBUG") != nullptr) {
+            std::filesystem::path debugDir = common::dir::getRuntimeDir() / "debug";
+            std::filesystem::create_directories(debugDir, ec);
+            if (ec) {
+                LogE("failed to create debug directory {}: {}", debugDir, ec.message());
+                break;
+            }
 
-    // bundle dir should created before container run
-    auto bundle = runtimeDir / "linglong" / this->id.toStdString();
-#ifdef LINGLONG_FONT_CACHE_GENERATOR
-    if (!bundle.mkpath("conf.d")) {
-        return LINGLONG_ERR("make conf.d directory");
-    }
-#endif
-    auto _ = // NOLINT
-      utils::finally::finally([&]() {
-          std::error_code ec;
-          while (!qEnvironmentVariableIsEmpty("LINGLONG_DEBUG")) {
-              if (!std::filesystem::create_directories(runtimeDir / "linglong/debug", ec) && ec) {
-                  qCritical() << "failed to create debug directory:" << ec.message().c_str();
-                  break;
-              }
+            auto archive = debugDir / this->bundleDir.filename();
+            std::filesystem::rename(this->bundleDir, archive, ec);
+            if (ec) {
+                LogE("failed to rename bundle directory to {}: {}", archive, ec.message());
+                break;
+            }
 
-              auto archive = runtimeDir / "linglong/debug" / this->id.toStdString();
-              std::filesystem::rename(bundle, archive, ec);
-              if (ec) {
-                  qCritical() << "failed to rename bundle directory:" << ec.message().c_str();
-                  break;
-              }
+            return;
+        }
 
-              return;
-          }
-      });
+        std::filesystem::remove_all(this->bundleDir, ec);
+        if (ec) {
+            LogW("failed to remove bundle directory {}: {}", this->bundleDir, ec.message());
+        }
+    });
 
     auto curProcess =
       std::move(this->cfg.process).value_or(ocppi::runtime::config::types::Process{});
     mergeProcessConfig(curProcess, process);
     this->cfg.process = std::move(curProcess);
 
+    std::error_code ec;
     if (this->cfg.process->cwd.empty()) {
-        qDebug() << "cwd of process is empty, run process in current directory.";
-        this->cfg.process->cwd = ("/run/host/rootfs" + QDir::currentPath()).toStdString();
+        auto cwd = std::filesystem::current_path(ec);
+        LogD("cwd of process is empty, run process in current directory {}.", cwd);
+        this->cfg.process->cwd = std::filesystem::path{ "/run/host/rootfs" } / cwd;
     }
 
     if (!this->cfg.process->user) {
@@ -193,24 +191,11 @@ utils::error::Result<void> Container::run(const ocppi::runtime::config::types::P
     auto originalArgs =
       this->cfg.process->args.value_or(std::vector<std::string>{ "echo", "noting to run" });
 
-    auto entrypoint = bundle / "entrypoint.sh";
-    {
-        std::ofstream ofs(entrypoint);
-        Q_ASSERT(ofs.is_open());
-        if (!ofs.is_open()) {
-            return LINGLONG_ERR("create font config in bundle directory");
-        }
-
-        // TODO: maybe we could use a symlink '/usr/bin/ll-init' points to
-        // '/run/linglong/container-init' will be better
-        ofs << "#!/run/linglong/container-init /bin/bash\n";
-        ofs << "source /etc/profile\n"; // we need use /etc/profile to generate all needed
-                                        // environment variables
-        ofs << "exec ";
-
-        for (auto arg : originalArgs) {
-            ofs << utils::quoteBashArg(arg) << " ";
-        }
+    auto entrypoint = bundleDir / "entrypoint.sh";
+    auto res = utils::writeFile(entrypoint,
+                                utils::BashCommandHelper::generateEntrypointScript(originalArgs));
+    if (!res) {
+        return LINGLONG_ERR(fmt::format("failed to write to {}", entrypoint), res);
     }
 
     std::filesystem::permissions(entrypoint, std::filesystem::perms::owner_all, ec);
@@ -218,58 +203,29 @@ utils::error::Result<void> Container::run(const ocppi::runtime::config::types::P
         return LINGLONG_ERR("make entrypoint executable", ec);
     }
 
+    auto entrypointPath = "/run/linglong/entrypoint.sh";
+
     this->cfg.mounts->push_back(ocppi::runtime::config::types::Mount{
-      .destination = "/run/linglong/entrypoint.sh",
+      .destination = entrypointPath,
       .options = { { "ro", "rbind" } },
       .source = entrypoint,
       .type = "bind",
     });
 
-    this->cfg.process->args = { "/run/linglong/entrypoint.sh" };
-
-#ifdef LINGLONG_FONT_CACHE_GENERATOR
-    {
-        std::ofstream ofs(bundle.absoluteFilePath("conf.d/99-linglong.conf").toStdString());
-        Q_ASSERT(ofs.is_open());
-        if (!ofs.is_open()) {
-            return LINGLONG_ERR("create font config in bundle directory");
-        }
-        ofs << "<?xml version=\"1.0\"?>" << std::endl;
-        ofs << "<!DOCTYPE fontconfig SYSTEM \"urn:fontconfig:fonts.dtd\">" << std::endl;
-        ofs << "<fontconfig>" << std::endl;
-        ofs << " <include ignore_missing=\"yes\">/run/linglong/cache/fonts/fonts.conf</include>"
-            << std::endl;
-        ofs << "</fontconfig>" << std::endl;
+    auto cmd = utils::BashCommandHelper::generateExecCommand(entrypointPath);
+    this->cfg.process->args = cmd;
+    res = utils::writeFile(bundleDir / "config.json", nlohmann::json(this->cfg).dump());
+    if (!res) {
+        return LINGLONG_ERR("failed to write to config.json", res);
     }
 
-    this->cfg.mounts->push_back(ocppi::runtime::config::types::Mount{
-      .destination = "/etc/fonts/conf.d",
-      .gidMappings = {},
-      .options = { { "ro", "rbind" } },
-      .source = bundle.absoluteFilePath("conf.d").toStdString(),
-      .type = "bind",
-      .uidMappings = {},
-    });
-#endif
-
-    {
-        std::ofstream ofs(bundle / "config.json");
-        Q_ASSERT(ofs.is_open());
-        if (!ofs.is_open()) {
-            return LINGLONG_ERR("create config.json in bundle directory");
-        }
-
-        ofs << nlohmann::json(this->cfg);
-        ofs.close();
-    }
-    qDebug() << "run container in " << bundle.c_str();
+    LogD("run container with bundle {}", bundleDir);
     // 禁用crun自己创建cgroup，便于AM识别和管理玲珑应用
     opt.GlobalOption::extra.emplace_back("--cgroup-manager=disabled");
 
-    auto result = this->cli.run(this->id.toStdString(), bundle, opt);
-
+    auto result = this->cli.run(this->id, bundleDir, opt);
     if (!result) {
-        return LINGLONG_ERR("cli run", result);
+        return LINGLONG_ERR("cli run", result.error());
     }
 
     return LINGLONG_OK;

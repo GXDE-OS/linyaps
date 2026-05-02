@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2024 UnionTech Software Technology Co., Ltd.
+ * SPDX-FileCopyrightText: 2024 - 2026 UnionTech Software Technology Co., Ltd.
  *
  * SPDX-License-Identifier: LGPL-3.0-or-later
  */
@@ -27,15 +27,11 @@ struct repoCacheQuery
     std::optional<std::string> module;
     std::optional<std::string> uuid;
     std::optional<bool> deleted;
+    std::optional<std::string> architecture;
 
-    static auto arch()
+    auto arch() const
     {
-        auto ret = package::Architecture::currentCPUArchitecture();
-        if (ret) {
-            return ret->toString().toStdString();
-        }
-
-        return std::string{ "unknown" };
+        return architecture.value_or(package::Architecture::currentCPUArchitecture().toString());
     }
 
     [[nodiscard]] std::string to_string() const noexcept
@@ -53,16 +49,17 @@ enum class MigrationStage : int64_t { RefsWithoutRepo };
 class RepoCache
 {
 public:
+    RepoCache(std::filesystem::path cacheFile);
     RepoCache(const RepoCache &) = delete;
     RepoCache &operator=(const RepoCache &) = delete;
     RepoCache(RepoCache &&other) = delete;
     RepoCache &operator=(RepoCache &&other) = delete;
     ~RepoCache() = default;
 
-    static utils::error::Result<std::unique_ptr<RepoCache>>
-    create(const std::filesystem::path &cacheFile,
-           const api::types::v1::RepoConfigV2 &repoConfig,
-           OstreeRepo &repo);
+    utils::error::Result<void> load();
+    utils::error::Result<void> rebuild(const api::types::v1::RepoConfigV2 &repoConfig,
+                                       OstreeRepo &repo) noexcept;
+
     utils::error::Result<void> addLayerItem(const api::types::v1::RepositoryCacheLayersItem &item);
     utils::error::Result<void>
     deleteLayerItem(const api::types::v1::RepositoryCacheLayersItem &item) noexcept;
@@ -82,14 +79,11 @@ public:
         return this->cache.merged;
     }
 
-    utils::error::Result<void> rebuildCache(const api::types::v1::RepoConfigV2 &repoConfig,
-                                            OstreeRepo &repo) noexcept;
     utils::error::Result<std::vector<api::types::v1::RepositoryCacheLayersItem>::iterator>
     findMatchingItem(const api::types::v1::RepositoryCacheLayersItem &item) noexcept;
     utils::error::Result<void> writeToDisk();
 
 private:
-    RepoCache() = default;
     static constexpr auto cacheFileVersion = "2";
     api::types::v1::RepositoryCache cache;
     std::filesystem::path cacheFile;

@@ -1,0 +1,213 @@
+// SPDX-FileCopyrightText: 2024-2026 UnionTech Software Technology Co., Ltd.
+//
+// SPDX-License-Identifier: LGPL-3.0-or-later
+
+#include <gtest/gtest.h>
+
+#include "../mocks/uab_file_mock.h"
+#include "common/tempdir.h"
+#include "linglong/api/types/v1/Generators.hpp"
+#include "linglong/common/strings.h"
+#include "linglong/package/uab_file.h"
+#include "linglong/package/uab_packager.h"
+#include "linglong/utils/cmd.h"
+
+#include <QCryptographicHash>
+#include <QFileInfo>
+
+#include <filesystem>
+#include <fstream>
+#include <memory>
+#include <string>
+
+#include <fcntl.h>
+#include <unistd.h>
+
+using namespace linglong;
+
+namespace linglong::package {
+
+class UabFileTest : public ::testing::Test
+{
+protected:
+    static void SetUpTestCase()
+    {
+        testDir = std::make_unique<TempDir>("linglong-uab-file-test-");
+        ASSERT_TRUE(testDir->isValid()) << "Failed to create temporary directory";
+        uabFile = (testDir->path() / "test.uab").string();
+        std::filesystem::copy_file("/proc/self/exe", uabFile);
+        auto uab = ElfHandler::create(uabFile);
+        ASSERT_TRUE(uab.has_value()) << "Failed to create uab file";
+        // 添加bundle section
+        std::string bundleFile = (testDir->path() / "bundle.erofs").string();
+        {
+            std::error_code ec;
+            std::filesystem::create_directories(testDir->path() / "bundle/layers/test/binary", ec);
+            ASSERT_FALSE(ec) << "Failed to create test directory";
+            std::string helloFilePath =
+              (testDir->path() / "bundle" / "layers" / "test" / "binary" / "info.json").string();
+            std::ofstream tmpFile(helloFilePath);
+            tmpFile << "Hello, World!";
+            tmpFile.close();
+            const auto bundleDir = testDir->path() / "bundle";
+            auto ret = utils::Cmd("mkfs.erofs").exec({ bundleFile.c_str(), bundleDir.c_str() });
+            ASSERT_TRUE(ret.has_value()) << "Failed to create erofs file" << ret.error().message();
+            auto ret2 = (*uab)->addSection("linglong.bundle", bundleFile);
+            ASSERT_TRUE(ret2.has_value()) << ret2.error().message();
+        }
+        // 新添加 meta section
+        {
+            api::types::v1::PackageInfoV2 packageInfo;
+            packageInfo.name = "hello";
+            packageInfo.version = "1";
+            packageInfo.description = "hello world";
+            packageInfo.id = "hello";
+            packageInfo.version = "1";
+            api::types::v1::UabMetaInfo meta;
+            meta.version = api::types::v1::Version::The1;
+            meta.uuid = "b2f33c7b-615c-4d7d-9181-e1a22010a749";
+            meta.onlyApp = true;
+            meta.sections.bundle = "linglong.bundle";
+            meta.layers.push_back(api::types::v1::UabLayer{ packageInfo, false });
+            // 计算bundle哈希值
+            QFile bundle{ bundleFile.c_str() };
+            if (!bundle.open(QIODevice::ReadOnly | QIODevice::ExistingOnly)) {
+                ASSERT_TRUE(false) << "Failed to open bundle file";
+            }
+            QCryptographicHash cryptor{ QCryptographicHash::Sha256 };
+            if (!cryptor.addData(&bundle)) {
+                ASSERT_TRUE(false) << "Failed to add data to cryptor";
+            }
+            bundle.close();
+            meta.digest = cryptor.result().toHex().toStdString();
+
+            std::ofstream jsonFile(testDir->path() / "info.json");
+            jsonFile << nlohmann::json(meta).dump();
+            jsonFile.close();
+            auto ret = (*uab)->addSection("linglong.meta", testDir->path() / "info.json");
+            ASSERT_TRUE(ret.has_value()) << "Failed to add meta section";
+        }
+        // 再添加sign section
+        {
+            auto signDir = testDir->path() / "sign";
+            std::error_code ec;
+            std::filesystem::create_directories(signDir, ec);
+            ASSERT_FALSE(ec) << "Failed to create sign directory";
+            std::string helloFilePath = signDir / "hello";
+            std::ofstream tmpFile(helloFilePath);
+            tmpFile << "Hello, World!";
+            tmpFile.close();
+            auto ret = utils::Cmd("tar").exec(
+              { "-cvf", (testDir->path() / "sign.tar").c_str(), "-C", signDir.c_str(), "." });
+            ASSERT_TRUE(ret.has_value()) << "Failed to create tar file";
+            auto ret2 = (*uab)->addSection("linglong.bundle.sign", testDir->path() / "sign.tar");
+            ASSERT_TRUE(ret2.has_value()) << "Failed to add sign section" << ret2.error().message();
+        }
+    }
+
+    static void TearDownTestCase() { testDir.reset(); }
+
+    void SetUp() override { }
+
+    void TearDown() override { }
+
+    static std::string uabFile;
+    static std::unique_ptr<TempDir> testDir;
+};
+
+std::string UabFileTest::uabFile;
+std::unique_ptr<TempDir> UabFileTest::testDir;
+
+TEST_F(UabFileTest, UnpackFuseOffset)
+{
+    // 打开UAB文件
+    int fd = open(uabFile.c_str(), O_RDONLY);
+    ASSERT_NE(fd, -1) << "Failed to open uab file" << strerror(errno);
+
+    // 初始化UABFile对象
+    auto uab = linglong::package::UABFile::loadFromFile(fd);
+    ASSERT_TRUE(uab.has_value()) << "Failed to load uab file";
+    auto unpackRet = (*uab)->unpack();
+    ASSERT_TRUE(unpackRet.has_value())
+      << "Failed to unpack uab file" << unpackRet.error().message();
+
+    ASSERT_TRUE(std::filesystem::exists(*unpackRet / "layers/test/binary/info.json"))
+      << "'info.json' not found in unpack dir" << *unpackRet / "info.json";
+}
+
+TEST_F(UabFileTest, UnpackFuse)
+{
+    {
+        auto ret = utils::Cmd("erofsfuse").exists();
+        if (!ret) {
+#ifdef GTEST_SKIP
+            GTEST_SKIP() << "Skipping this test.";
+#else
+            return;
+#endif
+        }
+    }
+    auto uab = MockUabFile(uabFile);
+    uab.wrapIsFileReadableFunc = []([[maybe_unused]] const std::string &path) {
+        return false;
+    };
+    uab.wrapMkdirDirFunc = [](const std::string &path) -> utils::error::Result<void> {
+        LINGLONG_TRACE("test");
+        if (common::strings::starts_with(path, "/var/tmp")) {
+            return LINGLONG_ERR("Cannot create directory in /var/tmp");
+        }
+        std::filesystem::create_directories(path);
+        return LINGLONG_OK;
+    };
+    auto unpackRet = uab.unpack();
+    ASSERT_TRUE(unpackRet.has_value()) << "Failed to unpack uab file";
+
+    ASSERT_TRUE(std::filesystem::exists(*unpackRet / "layers/test/binary/info.json"))
+      << "'info.json' not found in unpack dir" << *unpackRet / "info.json";
+}
+
+TEST_F(UabFileTest, UnpackFsck)
+{
+    auto uab = MockUabFile(uabFile);
+    uab.wrapCheckCommandExistsFunc = [](const std::string &command) {
+        if (command == "erofsfuse") {
+            return false;
+        }
+        return true;
+    };
+    auto unpackRet = uab.unpack();
+    ASSERT_TRUE(unpackRet.has_value()) << "Failed to unpack uab file";
+
+    ASSERT_TRUE(std::filesystem::exists(*unpackRet / "layers/test/binary/info.json"))
+      << "'info.json' not found in unpack dir" << *unpackRet / "info.json";
+}
+
+TEST_F(UabFileTest, Verify)
+{
+    auto uab = MockUabFile(uabFile);
+    auto verifyRet = uab.verify();
+    ASSERT_TRUE(verifyRet.has_value()) << "Failed to verify uab file";
+    ASSERT_TRUE(*verifyRet) << "Verify failed";
+}
+
+TEST_F(UabFileTest, ExtractSignData)
+{
+    auto uab = MockUabFile(uabFile);
+    auto ret = uab.unpack();
+    ASSERT_TRUE(ret.has_value()) << "Failed to unpack uab file " << ret.error().message();
+    auto extractSignDataRet = uab.extractSignData();
+    ASSERT_TRUE(extractSignDataRet.has_value())
+      << "Failed to extract sign data " << extractSignDataRet.error().message();
+    auto signDataDir = *extractSignDataRet / "entries" / "share" / "deepin-elf-verify" / ".elfsign";
+    ASSERT_TRUE(std::filesystem::exists(signDataDir / "hello"))
+      << "Failed to extract sign data " << signDataDir / "hello";
+    std::ifstream helloFile(signDataDir / "hello");
+    std::stringstream buffer;
+    buffer << helloFile.rdbuf();
+    ASSERT_EQ(buffer.str(), "Hello, World!") << "Failed to read hello file";
+    std::error_code ec;
+    std::filesystem::remove_all(*extractSignDataRet, ec);
+    ASSERT_FALSE(ec) << "Failed to remove extractSignDataRet" << ec.message();
+}
+
+} // namespace linglong::package

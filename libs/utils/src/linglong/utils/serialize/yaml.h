@@ -31,7 +31,8 @@ error::Result<T> LoadYAML(Source &content)
         nlohmann::json json = ytj::to_json(node);
         return json.template get<T>();
     } catch (...) {
-        return LINGLONG_ERR(std::current_exception());
+        auto exp = std::current_exception();
+        return LINGLONG_ERR(exp);
     }
 }
 
@@ -42,7 +43,7 @@ error::Result<T> LoadYAMLFile(const std::filesystem::path &filename) noexcept
 
     std::ifstream file_stream(filename);
     if (!file_stream.is_open()) {
-        return LINGLONG_ERR("Failed to open file: " + QString::fromStdString(filename));
+        return LINGLONG_ERR("Failed to open file: " + filename.string());
     }
 
     return LoadYAML<T>(file_stream);

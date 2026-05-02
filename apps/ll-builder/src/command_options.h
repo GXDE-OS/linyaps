@@ -9,8 +9,6 @@
 #include "linglong/builder/linglong_builder.h"
 #include "linglong/cli/cli.h"
 
-#include <filesystem>
-#include <optional>
 #include <string>
 #include <vector>
 
@@ -31,6 +29,8 @@ struct RunCommandOptions
     std::vector<std::string> execModules;
     std::vector<std::string> commands;
     bool debugMode = false;
+    std::string workdir = "";
+    std::vector<std::string> extensions;
 };
 
 struct ListCommandOptions
@@ -40,12 +40,13 @@ struct ListCommandOptions
 
 struct RemoveCommandOptions
 {
+    bool noCleanObjects = false;
     std::vector<std::string> removeList; // List of apps to remove
 };
 
 struct ExportCommandOptions
 {
-    linglong::builder::ExportOption exportSpecificOptions{ .exportI18n = true };
+    linglong::builder::ExportOption exportSpecificOptions;
     bool layerMode = false;
     std::string outputFile;
 };

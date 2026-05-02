@@ -1,4 +1,5 @@
 <!-- markdownlint-disable-next-line MD033 -->
+
 # <img src="./misc/image/logo.svg" alt="如意玲珑图标" width="24" height="24" style="vertical-align:middle;">如意玲珑：更先进的 Linux 跨发行版软件包管理工具集
 
 ## :package: 介绍
@@ -9,18 +10,21 @@
 [![Latest Release](https://img.shields.io/github/v/release/OpenAtom-Linyaps/linyaps?style=flat&color=brightgreen)](https://github.com/OpenAtom-Linyaps/linyaps/releases)
 [![Powered by Linyaps](https://img.shields.io/badge/powered%20by-Linyaps-ff69b4)](https://github.com/OpenAtom-Linyaps/linyaps)
 [![Build Status](https://build.deepin.com/projects/linglong:CI:latest/packages/linyaps/badge.svg?type=default)](https://build.deepin.com/projects/linglong:CI:latest)
+[![DeepSource](https://app.deepsource.com/gh/OpenAtom-Linyaps/linyaps.svg/?label=active+issues&show_trend=true&token=REPLACE_WITH_TOKEN)](https://app.deepsource.com/gh/OpenAtom-Linyaps/linyaps/)
 
 [![GitHub Stars](https://img.shields.io/github/stars/OpenAtom-Linyaps/linyaps?style=social)](https://github.com/OpenAtom-Linyaps/linyaps/stargazers)
 [![GitHub Forks](https://img.shields.io/github/forks/OpenAtom-Linyaps/linyaps?style=social&label=Fork)](https://github.com/OpenAtom-Linyaps/linyaps/network/members)
 [![Code Size](https://img.shields.io/github/languages/code-size/OpenAtom-Linyaps/linyaps)](https://github.com/OpenAtom-Linyaps/linyaps)
 [![GitHub Issues](https://img.shields.io/github/issues/OpenAtom-Linyaps/linyaps?style=social)](https://github.com/OpenAtom-Linyaps/linyaps/issues)
 
+[![Packaging status](https://repology.org/badge/vertical-allrepos/linyaps.svg)](https://repology.org/project/linyaps/versions)
+
 **如意玲珑**（Linyaps Is Not Yet Another Packaging System）是由如意玲珑社区团队开发并开源共建的**Linux 跨发行版软件包格式**，项目以独立沙盒容器的形式实现应用包的开发、管理、分发，用于替代 deb、rpm 等传统包管理工具，让 Linux 软件运行更兼容、更安全、更高效。
 
 ### :sparkles: 亮点
 
 - **独创的非全量运行时（Runtime）设计**：基于标准化沙箱 Runtime，应用一次构建即可覆盖所有 Linux 发行版。Runtime 多版本共存且文件共享减少冗余，启动时通过动态库共享复用已加载资源，**速度提升显著，避免依赖冲突**。
-- **非特权沙箱与双层隔离**：默认无 root 权限运行，通过内核  Namespace 隔离（进程/文件系统/网络等）构建**安全沙箱**。通过 OSTree 仓库提供原子化增量更新与版本回滚，相比全量沙箱方案，**资源占用更低**。
+- **非特权沙箱与双层隔离**：默认无 root 权限运行，通过内核 Namespace 隔离（进程/文件系统/网络等）构建**安全沙箱**。通过 OSTree 仓库提供原子化增量更新与版本回滚，相比全量沙箱方案，**资源占用更低**。
 
 ### :flags: 进展
 
@@ -121,16 +125,16 @@ ll-cli run cn.org.linyaps.demo
 由于在运行时和沙箱上的优化，玲珑有着比较显著的启动时间优势：
 
 | 测试次数 | linyaps 间隔帧数 | linyaps 启动耗时（ms） | Flatpak 间隔帧数 | Flatpak 启动耗时（ms） | AppImage 间隔帧数 | AppImage 启动耗时（ms） | Snap 间隔帧数 | Snap 启动耗时（ms） |
-| -------- | ----------------- | ----------------------- | ---------------- | ---------------------- | ----------------- | ----------------------- | ------------- | ------------------- |
-| 1        | 9                 | 149.4                   | 14               | 232.4                  | 16                | 265.6                   | 42            | 697.2               |
-| 2        | 9                 | 149.4                   | 13               | 215.8                  | 17                | 282.2                   | 41            | 680.6               |
-| 3        | 8                 | 132.8                   | 9                | 149.4                  | 15                | 249                     | 40            | 664                 |
-| 4        | 9                 | 149.4                   | 13               | 215.8                  | 15                | 249                     | 41            | 680.6               |
-| 5        | 8                 | 132.8                   | 14               | 232.4                  | 16                | 265.6                   | 42            | 697.2               |
-| 6        | 8                 | 132.8                   | 13               | 215.8                  | 15                | 249                     | 39            | 664                 |
-| 7        | 9                 | 149.4                   | 12               | 199.2                  | 15                | 249                     | 39            | 647.4               |
-| 8        | 8                 | 132.8                   | 14               | 232.4                  | 16                | 265.6                   | 40            | 680.6               |
-| 平均     | 8.5               | 141.1                   | 12.8             | 213.7                  | 15.6              | 261.6                   | 40.5          | 676.2               |
+| -------- | ---------------- | ---------------------- | ---------------- | ---------------------- | ----------------- | ----------------------- | ------------- | ------------------- |
+| 1        | 9                | 149.4                  | 14               | 232.4                  | 16                | 265.6                   | 42            | 697.2               |
+| 2        | 9                | 149.4                  | 13               | 215.8                  | 17                | 282.2                   | 41            | 680.6               |
+| 3        | 8                | 132.8                  | 9                | 149.4                  | 15                | 249                     | 40            | 664                 |
+| 4        | 9                | 149.4                  | 13               | 215.8                  | 15                | 249                     | 41            | 680.6               |
+| 5        | 8                | 132.8                  | 14               | 232.4                  | 16                | 265.6                   | 42            | 697.2               |
+| 6        | 8                | 132.8                  | 13               | 215.8                  | 15                | 249                     | 39            | 664                 |
+| 7        | 9                | 149.4                  | 12               | 199.2                  | 15                | 249                     | 39            | 647.4               |
+| 8        | 8                | 132.8                  | 14               | 232.4                  | 16                | 265.6                   | 40            | 680.6               |
+| 平均     | 8.5              | 141.1                  | 12.8             | 213.7                  | 15.6              | 261.6                   | 40.5          | 676.2               |
 
 ## :incoming_envelope: 获取帮助
 
@@ -144,59 +148,106 @@ ll-cli run cn.org.linyaps.demo
 
 ### 命令行工具
 
-- [introduction](./docs/pages/en/guide/ll-cli/introduction.md)
-- [install](./docs/pages/en/guide/ll-cli/install.md)
-- [run](./docs/pages/en/guide/ll-cli/run.md)
-- [uninstall](./docs/pages/en/guide/ll-cli/uninstall.md)
-- [upgrade](./docs/pages/en/guide/ll-cli/update.md)
-- [list](./docs/pages/en/guide/ll-cli/list.md)
-- [prune](./docs/pages/en/guide/ll-cli/prune.md)
-- [exec](./docs/pages/en/guide/ll-cli/exec.md)
-- [content](./docs/pages/en/guide/ll-cli/content.md)
-- [info](./docs/pages/en/guide/ll-cli/info.md)
-- [ps](./docs/pages/en/guide/ll-cli/ps.md)
-- [kill](./docs/pages/en/guide/ll-cli/kill.md)
-- [search](./docs/pages/en/guide/ll-cli/query.md)
+- [介绍](./docs/pages/guide/reference/commands/ll-cli/ll-cli.md)
+- [安装](./docs/pages/guide/reference/commands/ll-cli/install.md)
+- [运行](./docs/pages/guide/reference/commands/ll-cli/run.md)
+- [卸载](./docs/pages/guide/reference/commands/ll-cli/uninstall.md)
+- [升级](./docs/pages/guide/reference/commands/ll-cli/upgrade.md)
+- [列表](./docs/pages/guide/reference/commands/ll-cli/list.md)
+- [清理](./docs/pages/guide/reference/commands/ll-cli/prune.md)
+- [进入](./docs/pages/guide/reference/commands/ll-cli/enter.md)
+- [内容](./docs/pages/guide/reference/commands/ll-cli/content.md)
+- [信息](./docs/pages/guide/reference/commands/ll-cli/info.md)
+- [进程](./docs/pages/guide/reference/commands/ll-cli/ps.md)
+- [终止](./docs/pages/guide/reference/commands/ll-cli/kill.md)
+- [搜索](./docs/pages/guide/reference/commands/ll-cli/search.md)
 
 ### 构建工具
 
-- [introduction](./docs/pages/en/guide/ll-builder/introduction.md)
-- [demo](./docs/pages/en/guide/ll-builder/demo.md)
-- [create](./docs/pages/en/guide/ll-builder/create.md)
-- [run](./docs/pages/en/guide/ll-builder/run.md)
-- [push](./docs/pages/en/guide/ll-builder/push.md)
-- [export](./docs/pages/en/guide/ll-builder/export.md)
+- [介绍](./docs/pages/guide/reference/commands/ll-builder/ll-builder.md)
+- [演示](./docs/pages/guide/building/demo.md)
+- [创建](./docs/pages/guide/reference/commands/ll-builder/create.md)
+- [运行](./docs/pages/guide/reference/commands/ll-builder/run.md)
+- [推送](./docs/pages/guide/reference/commands/ll-builder/push.md)
+- [导出](./docs/pages/guide/reference/commands/ll-builder/export.md)
+- [构建](./docs/pages/guide/reference/commands/ll-builder/build.md)
+- [提取](./docs/pages/guide/reference/commands/ll-builder/extract.md)
+- [导入](./docs/pages/guide/reference/commands/ll-builder/import.md)
+- [列表](./docs/pages/guide/reference/commands/ll-builder/list.md)
+- [删除](./docs/pages/guide/reference/commands/ll-builder/remove.md)
+- [仓库](./docs/pages/guide/reference/commands/ll-builder/repo.md)
 
 ### 包转换工具
 
 #### deb 包转换
 
-- [introduction](./docs/pages/en/guide/ll-pica/introduction.md)
-- [init](./docs/pages/en/guide/ll-pica/init.md)
-- [convert](./docs/pages/en/guide/ll-pica/convert.md)
-- [adep](./docs/pages/en/guide/ll-pica/adep.md)
+- [介绍](./docs/pages/guide/reference/commands/ll-pica/ll-pica.md)
+- [初始化](./docs/pages/guide/reference/commands/ll-pica/ll-pica-init.md)
+- [转换](./docs/pages/guide/reference/commands/ll-pica/ll-pica-convert.md)
+- [依赖](./docs/pages/guide/reference/commands/ll-pica/ll-pica-adep.md)
 
 #### AppImage 包转换
 
-- [introduction](./docs/pages/en/guide/ll-appimage-convert/introduction.md)
-- [convert](./docs/pages/en/guide/ll-appimage-convert/convert-appimage.md)
+- [介绍](./docs/pages/guide/reference/commands/ll-appimage-convert/ll-appimage-convert.md)
+- [转换](./docs/pages/guide/reference/commands/ll-appimage-convert/ll-appimage-convert-convert.md)
 
 #### Flatpak 包转换
 
-- [introduction](./docs/pages/en/guide/ll-flatpak-convert/introduction.md)
-- [convert](./docs/pages/en/guide/ll-flatpak-convert/convert-flatpak.md)
+- [介绍](./docs/pages/guide/reference/commands/ll-pica-flatpak/ll-pica-flatpak.md)
+- [转换](./docs/pages/guide/reference/commands/ll-pica-flatpak/ll-pica-flatpak-convert.md)
 
 ### 调试
 
-- [debug](/docs/pages/en/guide/debug/debug.md)
+- [调试指南](./docs/pages/guide/debug/debug.md)
 
 ### 常见问题
 
-- [运行相关常见问题](/docs/pages/en/guide/debug/faq.md)
-- [如意玲珑构建工具常见问题](/docs/pages/en/guide/debug/ll-builder-faq.md)
-- [如意玲珑转换工具常见问题](/docs/pages/en/guide/debug/ll-pica-faq.md)
+- [运行相关常见问题](./docs/pages/guide/tips-and-faq/faq.md)
+- [如意玲珑构建工具常见问题](./docs/pages/guide/tips-and-faq/ll-builder-faq.md)
+- [如意玲珑转换工具常见问题](./docs/pages/guide/tips-and-faq/ll-pica-faq.md)
 
 ## :book: 学习和参考
+
+### 入门指南
+
+- [概述](./docs/pages/guide/start/whatis.md) - 如意玲珑基本概念介绍
+- [安装指南](./docs/pages/guide/start/install.md) - 详细安装说明
+- [构建第一个应用](./docs/pages/guide/start/build_your_first_app.md) - 初学者完整教程
+
+### 构建和打包
+
+- [包规范](./docs/pages/guide/building/linyaps_package_spec.md) - 详细打包标准
+- [构建配置](./docs/pages/guide/building/manifests.md) - 理解 linglong.yaml
+- [模块管理](./docs/pages/guide/building/modules.md) - 模块拆分和管理
+- [多架构支持](./docs/pages/guide/building/multiarch.md) - 多架构构建
+- [演示示例](./docs/pages/guide/building/demo.md) - 实际构建演示
+
+### 参考文档
+
+- [基本概念](./docs/pages/guide/reference/basic-concepts.md) - 核心概念和术语
+- [运行时组件](./docs/pages/guide/reference/runtime.md) - 运行时系统详情
+- [驱动文档](./docs/pages/guide/reference/driver.md) - 驱动相关信息
+
+### 高级主题
+
+- [桌面集成](./docs/pages/guide/desktop-integration/README.md) - 桌面环境集成
+- [单元测试](./docs/pages/guide/extra/unit-testing.md) - 测试框架和实践
+- [包格式](./docs/pages/guide/extra/bundle-format.md) - 包格式规范
+- [系统助手](./docs/pages/guide/extra/system-helper.md) - 系统工具文档
+- [应用配置](./docs/pages/guide/extra/app-conf.md) - 应用配置指南
+- [根文件系统](./docs/pages/guide/extra/rootfs.md) - 根文件系统管理
+- [UAB 构建](./docs/pages/guide/extra/uab-build.md) - UAB 格式构建
+- [仓库管理](./docs/pages/guide/publishing/repositories.md) - 仓库操作
+- [UAB 发布](./docs/pages/guide/publishing/uab.md) - UAB 格式发布
+- [镜像站点](./docs/pages/guide/publishing/mirrors.md) - 镜像配置
+
+### 系列教程
+
+- [玲珑应用构建工程基础知识](./docs/pages/guide/lessons/basic-notes.md)
+- [容器内手动编译应用](./docs/pages/guide/lessons/build-in-env.md)
+- [本地源码手动编译应用](./docs/pages/guide/lessons/build-offline-src.md)
+- [使用 git&patch 编译应用](./docs/pages/guide/lessons/build-git-patch.md)
+- [玲珑应用自动化测试套件](./docs/pages/guide/lessons/test-with-toolchains.md)
 
 ### 相关项目
 
@@ -204,19 +255,11 @@ ll-cli run cn.org.linyaps.demo
 - [如意玲珑打包工具 - ll-killer-go](https://github.com/System233/ll-killer-go)
 - [如意玲珑网页商店](https://github.com/yoloke/Linglong-Shop)
 
-### 系列教程
-
-- [玲珑应用构建工程基础知识](/docs/pages/guide/lessons/basic-notes.md)
-- [容器内手动编译应用](/docs/pages/guide/lessons/build-in-env.md)
-- [本地源码手动编译应用](/docs/pages/guide/lessons/build-offline-src.md)
-- [使用 git&patch 编译应用](/docs/pages/guide/lessons/build-git-patch.md)
-- [玲珑应用自动化测试套件](/docs/pages/guide/lessons/test-with-toolchains.md)
-
 更多课程可参考如意玲珑官网：<https://linyaps.org.cn/learn>
 
 ## :hammer_and_pick: 参与
 
-我们鼓励您报告问题并贡献更改。查看 [构建指南](./BUILD.zh_CN.md) 以获取从源代码构建 linyaps 的说明。
+我们鼓励您报告问题并贡献更改。查看 [开发者指南](./开发者指南.md) 以获取从源代码构建 linyaps 的说明。
 
 您可以在 [Discussions](https://github.com/OpenAtom-Linyaps/linyaps/discussions) 上发起话题讨论。
 

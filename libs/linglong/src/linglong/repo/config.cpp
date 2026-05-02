@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2022 UnionTech Software Technology Co., Ltd.
+ * SPDX-FileCopyrightText: 2022 - 2026 UnionTech Software Technology Co., Ltd.
  *
  * SPDX-License-Identifier: LGPL-3.0-or-later
  */
@@ -8,19 +8,23 @@
 
 #include "linglong/api/types/v1/Generators.hpp"
 #include "linglong/utils/error/error.h"
+#include "linglong/utils/log/log.h"
 #include "linglong/utils/serialize/yaml.h"
 #include "ytj/ytj.hpp"
+
+#include <fmt/format.h>
 
 #include <fstream>
 
 namespace linglong::repo {
 
-utils::error::Result<api::types::v1::RepoConfigV2> loadConfig(const QString &file) noexcept
+utils::error::Result<api::types::v1::RepoConfigV2>
+loadConfig(const std::filesystem::path &file) noexcept
 {
-    LINGLONG_TRACE(QString("load repo config from %1").arg(file));
+    LINGLONG_TRACE(fmt::format("load repo config from {}", file));
 
     try {
-        auto ifs = std::ifstream(file.toLocal8Bit());
+        auto ifs = std::ifstream(file);
         if (!ifs.is_open()) {
             return LINGLONG_ERR("open failed");
         }
@@ -44,18 +48,19 @@ utils::error::Result<api::types::v1::RepoConfigV2> loadConfig(const QString &fil
     }
 }
 
-utils::error::Result<api::types::v1::RepoConfigV2> loadConfig(const QStringList &files) noexcept
+utils::error::Result<api::types::v1::RepoConfigV2>
+loadConfig(const std::vector<std::filesystem::path> &files) noexcept
 {
-    LINGLONG_TRACE(QString("load repo config from %1").arg(files.join(" ")));
+    LINGLONG_TRACE("load repo config");
 
     for (const auto &file : files) {
         auto config = loadConfig(file);
         if (!config.has_value()) {
-            qDebug() << "Failed to load repo config from" << file << ":" << config.error();
+            LogD("Failed to load repo config from {}: {}", file, config.error());
             continue;
         }
 
-        qDebug() << "load repo config from" << file;
+        LogD("load repo config from {}", file);
         return config;
     }
 
@@ -63,9 +68,9 @@ utils::error::Result<api::types::v1::RepoConfigV2> loadConfig(const QStringList 
 }
 
 utils::error::Result<void> saveConfig(const api::types::v1::RepoConfigV2 &cfg,
-                                      const QString &path) noexcept
+                                      const std::filesystem::path &path) noexcept
 {
-    LINGLONG_TRACE(QString("save config to %1").arg(path));
+    LINGLONG_TRACE(fmt::format("save config to {}", path));
 
     try {
         auto defaultRepoExists =
@@ -77,7 +82,7 @@ utils::error::Result<void> saveConfig(const api::types::v1::RepoConfigV2 &cfg,
             return LINGLONG_ERR("default repo not found in repos");
         }
 
-        auto ofs = std::ofstream(path.toLocal8Bit());
+        auto ofs = std::ofstream(path);
         if (!ofs.is_open()) {
             return LINGLONG_ERR("open failed");
         }
@@ -91,7 +96,7 @@ utils::error::Result<void> saveConfig(const api::types::v1::RepoConfigV2 &cfg,
     }
 }
 
-api::types::v1::Repo getDefaultRepo(const api::types::v1::RepoConfigV2 &cfg) noexcept
+const api::types::v1::Repo &getDefaultRepo(const api::types::v1::RepoConfigV2 &cfg) noexcept
 {
     const auto &defaultRepo =
       std::find_if(cfg.repos.begin(), cfg.repos.end(), [&cfg](const auto &repo) {
@@ -99,6 +104,32 @@ api::types::v1::Repo getDefaultRepo(const api::types::v1::RepoConfigV2 &cfg) noe
       });
 
     return *defaultRepo;
+}
+
+std::vector<api::types::v1::Repo> getPrioritySortedRepos(api::types::v1::RepoConfigV2 cfg) noexcept
+{
+    std::stable_sort(cfg.repos.begin(), cfg.repos.end(), [](const auto &repo1, const auto &repo2) {
+        return repo1.priority > repo2.priority;
+    });
+    return cfg.repos;
+}
+
+std::vector<std::vector<api::types::v1::Repo>>
+getPriorityGroupedRepos(api::types::v1::RepoConfigV2 cfg) noexcept
+{
+    auto sortedRepos = getPrioritySortedRepos(std::move(cfg));
+    if (sortedRepos.empty()) {
+        return {};
+    }
+
+    std::vector<std::vector<api::types::v1::Repo>> groupedRepos;
+    for (const auto &repo : sortedRepos) {
+        if (groupedRepos.empty() || groupedRepos.back().front().priority != repo.priority) {
+            groupedRepos.emplace_back();
+        }
+        groupedRepos.back().emplace_back(repo);
+    }
+    return groupedRepos;
 }
 
 api::types::v1::RepoConfigV2 convertToV2(const api::types::v1::RepoConfig &cfg) noexcept

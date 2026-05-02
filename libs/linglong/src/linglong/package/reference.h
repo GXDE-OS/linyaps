@@ -12,38 +12,34 @@
 #include "linglong/package/architecture.h"
 #include "linglong/package/version.h"
 
-#include <QString>
-
 namespace linglong::package {
 
 // This class is a reference to a tier, use as a tier ID.
 class Reference final
 {
 public:
-    static utils::error::Result<Reference> parse(const QString &raw) noexcept;
-    static utils::error::Result<Reference> create(const QString &channel,
-                                                  const QString &id,
+    static utils::error::Result<Reference> parse(const std::string &raw) noexcept;
+    static utils::error::Result<Reference> create(const std::string &channel,
+                                                  const std::string &id,
                                                   const Version &version,
                                                   const Architecture &architecture) noexcept;
     static utils::error::Result<Reference>
     fromPackageInfo(const api::types::v1::PackageInfoV2 &info) noexcept;
-    static QVariantMap toVariantMap(const Reference &ref) noexcept;
-    static utils::error::Result<Reference> fromVariantMap(const QVariantMap &data) noexcept;
     static utils::error::Result<Reference>
     fromBuilderProject(const api::types::v1::BuilderProject &project) noexcept;
 
-    QString channel;
-    QString id;
+    std::string channel;
+    std::string id;
     Version version;
     Architecture arch;
 
-    [[nodiscard]] QString toString() const noexcept;
+    [[nodiscard]] std::string toString() const noexcept;
     friend bool operator!=(const Reference &lhs, const Reference &rhs) noexcept;
     friend bool operator==(const Reference &lhs, const Reference &rhs) noexcept;
 
 private:
-    Reference(const QString &channel,
-              const QString &id,
+    Reference(const std::string &channel,
+              const std::string &id,
               const Version &version,
               const Architecture &architecture);
 };
@@ -62,11 +58,16 @@ struct std::hash<linglong::package::Reference>
 {
     size_t operator()(const linglong::package::Reference &ref) const noexcept
     {
-        size_t hash = 0;
-        hash ^= qHash(ref.channel);
-        hash ^= qHash(ref.id) << 1;
-        hash ^= qHash(ref.version.toString()) << 2;
-        hash ^= qHash(ref.arch.toString()) << 3;
-        return hash;
+        auto hash_combine = [](std::size_t &seed, std::size_t value) {
+            seed ^= value + 0x9e3779b97f4a7c15ULL + (seed << 6U) + (seed >> 2U);
+        };
+
+        std::size_t seed = 0;
+        auto hasher = std::hash<std::string>{};
+        hash_combine(seed, hasher(ref.channel));
+        hash_combine(seed, hasher(ref.id));
+        hash_combine(seed, hasher(ref.version.toString()));
+        hash_combine(seed, hasher(ref.arch.toString()));
+        return seed;
     }
 };

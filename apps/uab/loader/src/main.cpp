@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later
 
 #include "linglong/api/types/v1/Generators.hpp" // IWYU pragma: keep
+#include "linglong/common/strings.h"
 #include "linglong/oci-cfg-generators/container_cfg_builder.h"
 #include "ocppi/runtime/config/types/Generators.hpp" // IWYU pragma: keep
 #include "ocppi/runtime/config/types/Hook.hpp"
@@ -54,7 +55,6 @@ void cleanResource()
         return;
     }
 
-    containerBundle.clear();
     if (::getenv("LINGLONG_UAB_DEBUG") != nullptr) {
         return;
     }
@@ -65,6 +65,7 @@ void cleanResource()
                   << std::endl;
         return;
     }
+    containerBundle.clear();
 }
 
 [[noreturn]] void cleanAndExit(int exitCode) noexcept
@@ -187,29 +188,118 @@ bool processLDConfig(linglong::generator::ContainerCfgBuilder &builder,
         }
     }
 
-    builder.addExtraMounts({ {
-                               .destination = "/etc/" + randomFile.filename().string(),
-                               .options = { { "ro", "rbind" } },
-                               .source = randomFile,
-                               .type = "bind",
-                             },
-                             {
-                               .destination = "/etc/ld.so.conf.d/zz_deepin-linglong.ld.so.conf",
-                               .options = { { "ro", "rbind" } },
-                               .source = ldConf,
-                               .type = "bind",
-                             } });
+    builder.addExtraMounts(std::vector<ocppi::runtime::config::types::Mount>{
+      ocppi::runtime::config::types::Mount{
+        .destination = "/etc/" + randomFile.filename().string(),
+        .options = { { "ro", "bind" } },
+        .source = randomFile,
+        .type = "bind",
+      },
+      ocppi::runtime::config::types::Mount{
+        .destination = "/etc/ld.so.conf.d/zz_deepin-linglong.ld.so.conf",
+        .options = { { "ro", "bind" } },
+        .source = ldConf,
+        .type = "bind",
+      } });
 
-    builder.setStartContainerHooks(
-      { {
-          .args = std::vector<std::string>{ "/sbin/ldconfig", "-C", "/tmp/ld.so.cache" },
-          .path = "/sbin/ldconfig",
-        },
-        {
-          .args =
-            std::vector<std::string>{ "/bin/sh", "-c", "cat /tmp/ld.so.cache > /etc/ld.so.cache" },
-          .path = "/bin/sh",
-        } });
+    builder.setStartContainerHooks(std::vector<ocppi::runtime::config::types::Hook>{
+      ocppi::runtime::config::types::Hook{
+        .args = std::vector<std::string>{ "/sbin/ldconfig", "-C", "/tmp/ld.so.cache" },
+        .path = "/sbin/ldconfig",
+      },
+      ocppi::runtime::config::types::Hook{
+        .args =
+          std::vector<std::string>{ "/bin/sh", "-c", "cat /tmp/ld.so.cache > /etc/ld.so.cache" },
+        .path = "/bin/sh",
+      } });
+
+    return true;
+}
+
+bool processProfile(const std::filesystem::path &extraDir,
+                    linglong::generator::ContainerCfgBuilder &builder)
+{
+    std::error_code ec;
+
+    auto tripletFile = extraDir / "linglong-triplet-list";
+    if (!std::filesystem::exists(tripletFile, ec)) {
+        if (ec) {
+            std::cerr << "failed to get directory " << extraDir << ":" << ec.message()
+                      << " code:" << ec.value() << std::endl;
+            return false;
+        }
+
+        return true;
+    }
+    builder.addExtraMount(ocppi::runtime::config::types::Mount{
+      .destination = "/etc/linglong-triplet-list",
+      .options = { { "ro", "bind" } },
+      .source = tripletFile,
+      .type = "bind",
+    });
+
+    auto profile = extraDir / "profile";
+    if (!std::filesystem::exists(profile, ec)) {
+        if (ec) {
+            std::cerr << "failed to get directory " << extraDir << ":" << ec.message()
+                      << " code:" << ec.value() << std::endl;
+            return false;
+        }
+
+        return true;
+    }
+    builder.addExtraMount(ocppi::runtime::config::types::Mount{
+      .destination = "/etc/profile",
+      .options = { { "ro", "bind" } },
+      .source = profile,
+      .type = "bind",
+    });
+
+    return true;
+}
+
+bool generateEntrypoint(linglong::generator::ContainerCfgBuilder &builder,
+                        std::vector<std::string> originalArgs) noexcept
+{
+    std::string content = "#!/usr/bin/env bash\nsource /etc/profile\nexec ";
+    for (const auto &arg : originalArgs) {
+        content.append(linglong::common::strings::quoteBashArg(arg));
+        content.push_back(' ');
+    }
+
+    const auto entryPoint = containerBundle / "entrypoint.sh";
+    {
+        std::ofstream stream{ entryPoint };
+        if (!stream.is_open()) {
+            std::cerr << "failed to open file "
+                      << containerBundle / "entrypoint.sh:" << ::strerror(errno) << std::endl;
+            return false;
+        }
+
+        stream << content;
+        if (stream.fail()) {
+            std::cerr << "failed to write entrypoint to " << entryPoint << std::endl;
+            return false;
+        }
+    }
+
+    std::error_code ec;
+    std::filesystem::permissions(entryPoint,
+                                 std::filesystem::perms::owner_exec,
+                                 std::filesystem::perm_options::add,
+                                 ec);
+    if (ec) {
+        std::cerr << "failed to set permission of " << entryPoint << ":" << ec.message()
+                  << std::endl;
+        return false;
+    }
+
+    builder.addExtraMount(ocppi::runtime::config::types::Mount{
+      .destination = "/entrypoint.sh",
+      .options = { { "bind", "ro" } },
+      .source = entryPoint,
+      .type = "bind",
+    });
 
     return true;
 }
@@ -288,7 +378,7 @@ int main([[maybe_unused]] int argc, [[maybe_unused]] char **argv) // NOLINT
     }
 
     auto containerID = genRandomString();
-    auto containerBundleDir = bundleDir.parent_path().parent_path() / containerID;
+    auto containerBundleDir = bundleDir.parent_path() / containerID;
     if (!std::filesystem::create_directories(containerBundleDir, ec) && ec) {
         std::cerr << "couldn't create directory " << containerBundleDir << " :" << ec.message()
                   << std::endl;
@@ -321,23 +411,25 @@ int main([[maybe_unused]] int argc, [[maybe_unused]] char **argv) // NOLINT
     }
 
     builder.setBundlePath(containerBundle)
-      .setBasePath("/")
+      .setBasePath("/", false)
       .enableSelfAdjustingMount()
       .forwardEnv()
       .addUIdMapping(uid, uid, 1)
       .addGIdMapping(gid, gid, 1)
-      .addExtraMounts({ {
-                          .destination = "/etc/ld.so.cache",
-                          .options = { { "rbind" } },
-                          .source = runtimeLD,
-                          .type = "bind",
-                        },
-                        {
-                          .destination = "/tmp",
-                          .options = { { "rbind" } },
-                          .source = "/tmp",
-                          .type = "bind",
-                        } });
+      .addExtraMounts(
+        std::vector<ocppi::runtime::config::types::Mount>{ ocppi::runtime::config::types::Mount{
+                                                             .destination = "/etc/ld.so.cache",
+                                                             .options = { { "bind" } },
+                                                             .source = runtimeLD,
+                                                             .type = "bind",
+                                                           },
+                                                           ocppi::runtime::config::types::Mount{
+                                                             .destination = "/tmp",
+                                                             .options = { { "rbind" } },
+                                                             .source = "/tmp",
+                                                             .type = "bind",
+                                                           } })
+      .appendEnv("LINGLONG_APPID", builder.getAppId());
 
     auto extraDir = bundleDir / "extra";
     if (!std::filesystem::exists(extraDir, ec)) {
@@ -444,6 +536,22 @@ int main([[maybe_unused]] int argc, [[maybe_unused]] char **argv) // NOLINT
         return -1;
     }
 
+    // add extra profile
+    if (!processProfile(extraDir, builder)) {
+        std::cerr << "failed to processing profile" << std::endl;
+        return -1;
+    }
+
+    // generate entrypoint
+    auto command = appInfo->command.value_or(std::vector<std::string>{ "/bin/bash" });
+    for (int i = 1; i < argc; ++i) {
+        command.push_back(argv[i]);
+    }
+    if (!generateEntrypoint(builder, command)) {
+        std::cerr << "failed to generate entrypoint" << std::endl;
+        return -1;
+    }
+
     // dump to bundle
     auto bundleCfg = containerBundle / "config.json";
     nlohmann::json json;
@@ -464,13 +572,15 @@ int main([[maybe_unused]] int argc, [[maybe_unused]] char **argv) // NOLINT
         auto process = json["process"].get<ocppi::runtime::config::types::Process>();
         process.terminal = (::isatty(STDOUT_FILENO) == 1);
         process.user = ocppi::runtime::config::types::User{ .gid = getgid(), .uid = getuid() };
-        process.args = appInfo->command.value_or(std::vector<std::string>{ "bash" });
+        process.args = std::vector<std::string>{ "/entrypoint.sh" };
         json["process"] = std::move(process);
 
         auto linux_ = json["linux"].get<ocppi::runtime::config::types::Linux>();
         linux_.namespaces = std::vector<ocppi::runtime::config::types::NamespaceReference>{
-            { .type = ocppi::runtime::config::types::NamespaceType::User },
-            { .type = ocppi::runtime::config::types::NamespaceType::Mount }
+            ocppi::runtime::config::types::NamespaceReference{
+              .type = ocppi::runtime::config::types::NamespaceType::User },
+            ocppi::runtime::config::types::NamespaceReference{
+              .type = ocppi::runtime::config::types::NamespaceType::Mount }
         };
         json["linux"] = std::move(linux_);
 
@@ -491,8 +601,6 @@ int main([[maybe_unused]] int argc, [[maybe_unused]] char **argv) // NOLINT
     }
 
     if (pid == 0) {
-        std::cout << "run container" << boxBin.string() << " " << bundleArg << " " << containerID
-                  << std::endl;
         return ::execl(boxBin.c_str(),
                        boxBin.c_str(),
                        "--cgroup-manager=disabled",

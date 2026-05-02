@@ -36,8 +36,11 @@ configure_files(
   lib/tmpfiles.d/linglong.conf
   script/linglong.sh
   share/bash-completion/completions/ll-builder
+  share/zsh/vendor-completions/_ll-builder
+  share/fish/vendor_completions.d/ll-builder.fish
   share/bash-completion/completions/ll-cli
   share/zsh/vendor-completions/_ll-cli
+  share/fish/vendor_completions.d/ll-cli.fish
   share/dbus-1/system.d/org.deepin.linglong.PackageManager1.conf
   share/dbus-1/system-services/org.deepin.linglong.PackageManager1.service
   share/linglong/export-dirs.json
@@ -46,6 +49,7 @@ configure_files(
   share/linglong/config.yaml
   share/mime/packages/vnd.linyaps.uab.xml
   share/polkit-1/actions/org.deepin.linglong.PackageManager1.policy
+  share/icons/linyaps.svg
   share/applications/linyaps.desktop)
 
 # bash-completion
@@ -59,6 +63,12 @@ set(ZSH_COMPLETIONS_DIR ${CMAKE_INSTALL_DATADIR}/zsh)
 
 install(DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/share/zsh/vendor-completions
         DESTINATION ${ZSH_COMPLETIONS_DIR})
+
+# fish-completion
+set(FISH_COMPLETIONS_DIR ${CMAKE_INSTALL_DATADIR}/fish)
+
+install(DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/share/fish/vendor_completions.d
+        DESTINATION ${FISH_COMPLETIONS_DIR})
 
 # dbus
 set(DBUS_SYSTEM_BUS_DIR ${CMAKE_INSTALL_DATADIR}/dbus-1)
@@ -161,14 +171,16 @@ install(DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/share/mime/packages
         DESTINATION ${CMAKE_INSTALL_DATADIR}/mime)
 install(FILES ${CMAKE_CURRENT_BINARY_DIR}/share/applications/linyaps.desktop
         DESTINATION ${CMAKE_INSTALL_DATADIR}/applications)
+install(FILES ${CMAKE_CURRENT_BINARY_DIR}/share/icons/linyaps.svg
+        DESTINATION ${CMAKE_INSTALL_DATADIR}/icons/hicolor/scalable/apps)
 
 # set linglong XDG_DATA_DIRS environtment
 install(FILES ${CMAKE_CURRENT_BINARY_DIR}/script/linglong.sh
-        DESTINATION /etc/profile.d)
+        DESTINATION ${CMAKE_INSTALL_FULL_SYSCONFDIR}/profile.d)
 
 install(
   FILES ${CMAKE_CURRENT_BINARY_DIR}/script/linglong.sh
-  DESTINATION /etc/X11/Xsession.d/
+  DESTINATION ${CMAKE_INSTALL_FULL_SYSCONFDIR}/X11/Xsession.d/
   RENAME 21linglong)
 
 # polkit actions

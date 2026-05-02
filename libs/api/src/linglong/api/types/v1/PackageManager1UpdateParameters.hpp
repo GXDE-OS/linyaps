@@ -34,6 +34,14 @@ using nlohmann::json;
 */
 struct PackageManager1UpdateParameters {
 /**
+* upgrade applications only
+*/
+bool appOnly;
+/**
+* upgrade dependencies only
+*/
+bool depsOnly;
+/**
 * packages of package manager update
 */
 std::vector<PackageManager1Package> packages;

@@ -7,15 +7,19 @@
 #include "hooks.h"
 
 #include "configure.h"
+#include "linglong/common/error.h"
+#include "linglong/utils/env.h"
 #include "linglong/utils/error/error.h"
+#include "linglong/utils/log/log.h"
+
+#include <fmt/format.h>
 
 #include <array>
+#include <climits>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
-#include <functional>
-#include <limits>
 #include <sstream>
 #include <vector>
 
@@ -25,65 +29,9 @@
 namespace linglong::utils {
 
 // Constants for hook action prefixes
-static const std::string PRE_INSTALL_ACTION_PREFIX = "ll-pre-install=";
-static const std::string POST_INSTALL_ACTION_PREFIX = "ll-post-install=";
-static const std::string POST_UNINSTALL_ACTION_PREFIX = "ll-post-uninstall=";
-
-// Ensures variables are cleaned up even on early returns or exceptions.
-class EnvVarGuard
-{
-public:
-    EnvVarGuard(const std::string &name, const std::string &value)
-        : name(name)
-        , setOK(false)
-    {
-        if (setenv(name.c_str(), value.c_str(), 1) == 0) {
-            setOK = true;
-        } else {
-            qWarning() << "Failed to set environment variable" << name.c_str() << ":" << errno;
-        }
-    }
-
-    EnvVarGuard(const EnvVarGuard &) = delete;
-    EnvVarGuard &operator=(const EnvVarGuard &) = delete;
-
-    EnvVarGuard(EnvVarGuard &&other) noexcept
-        : name(std::move(other.name))
-        , setOK(other.setOK)
-    {
-        other.setOK = false;
-    }
-
-    EnvVarGuard &operator=(EnvVarGuard &&other) noexcept
-    {
-        if (this != &other) {
-            if (setOK && ::getenv(name.c_str()) != nullptr) {
-                if (unsetenv(name.c_str()) != 0) {
-                    qWarning() << "Failed to unset old environment variable" << name.c_str() << ":"
-                               << errno;
-                }
-            }
-            name = std::move(other.name);
-            setOK = other.setOK;
-            other.setOK = false;
-        }
-        return *this;
-    }
-
-    ~EnvVarGuard()
-    {
-        if (setOK && ::getenv(name.c_str()) != nullptr) {
-            if (unsetenv(name.c_str()) != 0) {
-                qWarning() << "Failed to unset environment variable" << name.c_str() << ":"
-                           << errno;
-            }
-        }
-    }
-
-private:
-    std::string name; // Name of the environment variable
-    bool setOK;
-};
+constexpr std::string_view PRE_INSTALL_ACTION_PREFIX = "ll-pre-install=";
+constexpr std::string_view POST_INSTALL_ACTION_PREFIX = "ll-post-install=";
+constexpr std::string_view POST_UNINSTALL_ACTION_PREFIX = "ll-post-uninstall=";
 
 // This function ensures the command string is safely wrapped for 'sh -c'.
 static std::string escapeAndWrapCommandForShell(const std::string &command)
@@ -106,10 +54,11 @@ utils::error::Result<void> executeHookCommands(
 {
     LINGLONG_TRACE("Executing command");
 
-    std::vector<EnvVarGuard> envVarGuards;
+    std::vector<std::unique_ptr<EnvironmentVariableGuard>> envVarGuards;
     envVarGuards.reserve(envVars.size());
     for (const auto &pair : envVars) {
-        envVarGuards.emplace_back(pair.first, pair.second);
+        envVarGuards.emplace_back(
+          std::make_unique<EnvironmentVariableGuard>(pair.first, pair.second));
     }
 
     for (const auto &command_raw : commands) {
@@ -118,24 +67,24 @@ utils::error::Result<void> executeHookCommands(
         int ret = std::system(fullCommand.c_str());
 
         if (ret == -1) {
-            return LINGLONG_ERR(QString("Failed to execute command: '%1'. System error: %2.")
-                                  .arg(QString::fromStdString(fullCommand))
-                                  .arg(strerror(errno)));
+            return LINGLONG_ERR(fmt::format("Failed to execute command: '{}'. System error: {}.",
+                                            fullCommand,
+                                            common::error::errorString(errno)));
         }
 
         if (!WIFEXITED(ret)) {
             int signalNum = WTERMSIG(ret);
-            return LINGLONG_ERR(QString("Command '%1' terminated by signal %2 (%3).")
-                                  .arg(QString::fromStdString(fullCommand))
-                                  .arg(signalNum)
-                                  .arg(strsignal(signalNum)));
+            return LINGLONG_ERR(fmt::format("Command '{}' terminated by signal {} ({}).",
+                                            fullCommand,
+                                            signalNum,
+                                            strsignal(signalNum)));
         }
 
         int exitStatus = WEXITSTATUS(ret);
         if (exitStatus != 0) {
-            return LINGLONG_ERR(QString("Command '%1' exited with non-zero status: %2.")
-                                  .arg(QString::fromStdString(fullCommand))
-                                  .arg(exitStatus));
+            return LINGLONG_ERR(fmt::format("Command '{}' exited with non-zero status: {}.",
+                                            fullCommand,
+                                            exitStatus));
         }
     }
     return LINGLONG_OK;
@@ -148,22 +97,21 @@ utils::error::Result<void> InstallHookManager::parseInstallHooks()
     std::error_code ec;
     for (const auto &entry : std::filesystem::directory_iterator(LINGLONG_INSTALL_HOOKS_DIR, ec)) {
         if (ec) {
-            return LINGLONG_ERR(QString("Failed to iterate directory %1: %2")
-                                  .arg(LINGLONG_INSTALL_HOOKS_DIR)
-                                  .arg(QString::fromStdString(ec.message())));
+            return LINGLONG_ERR(
+              fmt::format("Failed to iterate directory {}", LINGLONG_INSTALL_HOOKS_DIR),
+              ec);
         }
 
         if (!std::filesystem::is_regular_file(entry.status(ec))) {
             if (ec) {
-                qWarning() << "Failed to get status for" << entry.path().c_str() << ":"
-                           << QString::fromStdString(ec.message());
+                LogE("Failed to get status for {}: {}", entry.path().c_str(), ec.message());
             }
             continue;
         }
 
         std::ifstream file(entry.path());
         if (!file.is_open()) {
-            return LINGLONG_ERR(QString{ "Couldn't open file: %1" }.arg(entry.path().c_str()));
+            return LINGLONG_ERR(fmt::format("Couldn't open file: {}", entry.path()));
         }
 
         std::string line;
@@ -199,7 +147,6 @@ utils::error::Result<void> InstallHookManager::executeInstallHooks(int fd) noexc
     LINGLONG_TRACE("Executing pre-install hooks.");
 
     if (preInstallCommands.empty()) {
-        LINGLONG_TRACE("No pre-install commands to execute.");
         return LINGLONG_OK;
     }
 
@@ -211,8 +158,9 @@ utils::error::Result<void> InstallHookManager::executeInstallHooks(int fd) noexc
     auto size = readlink(oss.str().c_str(), pathBuf.data(), PATH_MAX);
 
     if (size == -1) {
-        return LINGLONG_ERR(
-          QString{ "Failed to read file link for fd %1: %2" }.arg(fd).arg(strerror(errno)));
+        return LINGLONG_ERR(fmt::format("Failed to read file link for fd {}: {}",
+                                        fd,
+                                        common::error::errorString(errno)));
     }
 
     pathBuf[size] = '\0';
@@ -226,16 +174,14 @@ utils::error::Result<void> InstallHookManager::executeInstallHooks(int fd) noexc
 utils::error::Result<void> InstallHookManager::executePostInstallHooks(
   const std::string &appID, const std::string &path) noexcept
 {
-    LINGLONG_TRACE("Executing post-install hooks.");
-
     if (postInstallCommands.empty()) {
-        LINGLONG_TRACE("No post-install commands to execute.");
         return LINGLONG_OK;
     }
 
-    std::vector<std::pair<std::string, std::string>> envVars = { { "LINGLONG_APPID", appID },
-                                                                 { "LINGLONG_APP_INSTALL_PATH",
-                                                                   path } };
+    const std::vector<std::pair<std::string, std::string>> envVars = {
+        { "LINGLONG_APPID", appID },
+        { "LINGLONG_APP_INSTALL_PATH", path }
+    };
 
     return executeHookCommands(postInstallCommands, envVars);
 }
@@ -243,14 +189,12 @@ utils::error::Result<void> InstallHookManager::executePostInstallHooks(
 utils::error::Result<void>
 InstallHookManager::executePostUninstallHooks(const std::string &appID) noexcept
 {
-    LINGLONG_TRACE("Executing post-uninstall hooks.");
-
     if (postUninstallCommands.empty()) {
-        LINGLONG_TRACE("No post-uninstall commands to execute.");
         return LINGLONG_OK;
     }
 
-    std::vector<std::pair<std::string, std::string>> envVars = { { "LINGLONG_APPID", appID } };
+    const std::vector<std::pair<std::string, std::string>> envVars = { { "LINGLONG_APPID",
+                                                                         appID } };
 
     return executeHookCommands(postUninstallCommands, envVars);
 }

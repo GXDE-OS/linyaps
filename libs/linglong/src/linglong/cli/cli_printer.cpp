@@ -33,8 +33,7 @@ std::wstring subwstr(std::wstring wstr, int width)
 
 void CLIPrinter::printErr(const utils::error::Error &err)
 {
-    std::cout << "Error: CODE=" << err.code() << std::endl
-              << err.message().toStdString() << std::endl;
+    std::cerr << "Error " << err.code() << ": " << err.message() << std::endl;
 }
 
 void CLIPrinter::printPruneResult(const std::vector<api::types::v1::PackageInfoV2> &list)
@@ -46,7 +45,7 @@ void CLIPrinter::printPruneResult(const std::vector<api::types::v1::PackageInfoV
     std::cout << "Unused base or runtime:" << std::endl;
     for (const auto &info : list) {
         auto ref = package::Reference::fromPackageInfo(info);
-        std::cout << ref->toString().toStdString() << std::endl;
+        std::cout << ref->toString() << std::endl;
     }
     std::cout << list.size() << " unused base or runtime have been removed." << std::endl;
 }
@@ -227,12 +226,6 @@ void CLIPrinter::printContainers(const std::vector<api::types::v1::CliContainer>
     }
 }
 
-void CLIPrinter::printReply(const api::types::v1::CommonResult &reply)
-{
-    std::cout << "code: " << reply.code << std::endl;
-    std::cout << "message:" << std::endl << reply.message << std::endl;
-}
-
 void CLIPrinter::printRepoConfig(const api::types::v1::RepoConfigV2 &repoInfo)
 {
     std::cout << "Default: " << repoInfo.defaultRepo << std::endl;
@@ -285,25 +278,16 @@ void CLIPrinter::printContent(const QStringList &filePaths)
     }
 }
 
-void CLIPrinter::printTaskState(double percentage,
-                                const QString &message,
-                                api::types::v1::State state,
-                                api::types::v1::SubState subState)
+void CLIPrinter::printProgress(double percentage, const std::string &message)
 {
     auto &stdout = std::cout;
-    if (state == api::types::v1::State::Failed) {
-        stdout << "\r\33[K"
-               << "\033[?25l" << message.toStdString() << "\033[?25h";
-    } else {
-        stdout << "\r\33[K"
-               << "\033[?25l" << message.toStdString() << ":" << percentage << "%"
-               << "\033[?25h";
+    stdout << "\r\33[K"
+           << "\033[?25l" << message;
+    if (percentage > 0) {
+        stdout << " " << std::fixed << std::setprecision(2) << percentage << "%"
+               << std::defaultfloat;
     }
-    if (state == api::types::v1::State::PartCompleted
-        || subState == api::types::v1::SubState::AllDone
-        || subState == api::types::v1::SubState::PackageManagerDone) {
-        stdout << "\n";
-    }
+    stdout << "\033[?25h";
     stdout.flush();
 }
 
@@ -343,9 +327,14 @@ void CLIPrinter::printInspect(const api::types::v1::InspectResult &result)
               << std::endl;
 }
 
-void CLIPrinter::printMessage(const QString &message)
+void CLIPrinter::printMessage(const std::string &message)
 {
-    std::cout << message.toStdString() << std::endl;
+    std::cout << message << std::endl;
+}
+
+void CLIPrinter::clearLine()
+{
+    std::cout << "\r\33[K";
 }
 
 } // namespace linglong::cli

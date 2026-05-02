@@ -8,14 +8,16 @@
 
 #include "linglong/utils/error/error.h"
 
+#include <fmt/format.h>
+
 #include <QRegularExpression>
 #include <QStringList>
 
 namespace linglong::package {
 
-utils::error::Result<FuzzyReference> FuzzyReference::parse(const QString &raw) noexcept
+utils::error::Result<FuzzyReference> FuzzyReference::parse(const std::string &raw) noexcept
 {
-    LINGLONG_TRACE("parse fuzz reference string " + raw);
+    LINGLONG_TRACE("parse fuzzy reference string " + raw);
 
     static auto regexp = []() noexcept {
         QRegularExpression regexp(
@@ -24,22 +26,23 @@ utils::error::Result<FuzzyReference> FuzzyReference::parse(const QString &raw) n
         return regexp;
     }();
 
-    auto matches = regexp.match(raw);
+    auto matches = regexp.match(QString::fromStdString(raw));
     if (not(matches.isValid() and matches.hasMatch())) {
-        return LINGLONG_ERR("regexp mismatched.", utils::error::ErrorCode::Unknown);
+        return LINGLONG_ERR("invalid fuzzy reference",
+                            utils::error::ErrorCode::InvalidFuzzyReference);
     }
 
-    std::optional<QString> channel = matches.captured("channel");
-    if (channel->isEmpty() || channel == "unknown") {
-        channel = std::nullopt;
+    std::optional<std::string> channel;
+    if (auto captured = matches.captured("channel"); !captured.isEmpty() && captured != "unknown") {
+        channel = captured.toStdString();
     }
 
-    auto id = matches.captured("id"); // NOLINT
+    auto id = matches.captured("id").toStdString(); // NOLINT
 
-    std::optional<QString> version;
+    std::optional<std::string> version;
     auto versionStr = matches.captured("version");
     if ((!versionStr.isEmpty()) && versionStr != "unknown") {
-        version = std::move(versionStr);
+        version = versionStr.toStdString();
     }
 
     std::optional<Architecture> architecture;
@@ -48,7 +51,7 @@ utils::error::Result<FuzzyReference> FuzzyReference::parse(const QString &raw) n
         auto tmpArchitecture = Architecture::parse(architectureStr.toStdString());
         if (!tmpArchitecture) {
             return LINGLONG_ERR(tmpArchitecture.error().message(),
-                                utils::error::ErrorCode::Unknown);
+                                utils::error::ErrorCode::UnknownArchitecture);
         }
         architecture = std::move(tmpArchitecture).value();
     }
@@ -57,9 +60,9 @@ utils::error::Result<FuzzyReference> FuzzyReference::parse(const QString &raw) n
 }
 
 utils::error::Result<FuzzyReference>
-FuzzyReference::create(const std::optional<QString> &channel,
-                       const QString &id, // NOLINT
-                       const std::optional<QString> &version,
+FuzzyReference::create(const std::optional<std::string> &channel,
+                       const std::string &id, // NOLINT
+                       const std::optional<std::string> &version,
                        const std::optional<Architecture> &arch) noexcept
 try {
     return FuzzyReference(channel, id, version, arch);
@@ -68,31 +71,31 @@ try {
     return LINGLONG_ERR(e.what(), utils::error::ErrorCode::Unknown);
 }
 
-FuzzyReference::FuzzyReference(const std::optional<QString> &channel,
-                               const QString &id,
-                               const std::optional<QString> &version,
+FuzzyReference::FuzzyReference(const std::optional<std::string> &channel,
+                               const std::string &id,
+                               const std::optional<std::string> &version,
                                const std::optional<Architecture> &architecture)
     : channel(channel)
     , id(id)
     , version(version)
     , arch(architecture)
 {
-    if (channel && channel->isEmpty()) {
+    if (channel && channel->empty()) {
         throw std::runtime_error("empty channel");
     }
 
-    if (id.isEmpty()) {
+    if (id.empty()) {
         throw std::runtime_error("empty id");
     }
 }
 
-QString FuzzyReference::toString() const noexcept
+std::string FuzzyReference::toString() const noexcept
 {
-    return QString("%1:%2/%3/%4")
-      .arg(this->channel.value_or("unknown"),
-           this->id,
-           this->version ? this->version.value() : "unknown",
-           this->arch ? this->arch->toString() : "unknown");
+    return fmt::format("{}:{}/{}/{}",
+                       this->channel.value_or("unknown"),
+                       this->id,
+                       this->version ? this->version.value() : "unknown",
+                       this->arch ? this->arch->toString() : "unknown");
 }
 
 } // namespace linglong::package

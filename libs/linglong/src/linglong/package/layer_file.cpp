@@ -6,8 +6,12 @@
 
 #include "linglong/package/layer_file.h"
 
-#include "linglong/api/types/v1/Generators.hpp"
+#include "linglong/api/types/v1/Generators.hpp" // IWYU pragma: keep
 #include "linglong/api/types/v1/LayerInfo.hpp"
+#include "linglong/common/error.h"
+#include "linglong/common/formatter.h"
+#include "linglong/utils/error/error.h"
+#include "linglong/utils/log/formatter.h" // IWYU pragma: keep
 #include "linglong/utils/serialize/json.h"
 
 #include <QDataStream>
@@ -31,7 +35,8 @@ utils::error::Result<QSharedPointer<LayerFile>> LayerFile::New(const QString &pa
     LINGLONG_TRACE("install layer file from path")
     auto fd = ::open(path.toLocal8Bit(), O_RDONLY);
     if (fd < 0) {
-        return LINGLONG_ERR("failed to open " + path + ":" + ::strerror(errno));
+        return LINGLONG_ERR(
+          fmt::format("failed to open {}: {}", path, common::error::errorString(errno)));
     }
 
     return New(fd);
@@ -55,7 +60,8 @@ utils::error::Result<QSharedPointer<LayerFile>> LayerFile::New(int fd) noexcept
         return LINGLONG_ERR("open layer failed");
     }
 
-    if (file->read(magicNumber.size()) != magicNumber) {
+    const auto &number = magicNumber();
+    if (file->read(number.size()) != number) {
         return LINGLONG_ERR("invalid magic number, this is not a layer");
     }
 
@@ -78,7 +84,7 @@ utils::error::Result<api::types::v1::LayerInfo> LayerFile::metaInfo() noexcept
 
     auto rawData = this->read(qint64(*ret));
 
-    auto layerInfo = utils::serialize::LoadJSON<api::types::v1::LayerInfo>(rawData);
+    auto layerInfo = utils::serialize::LoadJSON<api::types::v1::LayerInfo>(rawData.data());
     if (!layerInfo) {
         return LINGLONG_ERR(layerInfo);
     }
@@ -116,15 +122,16 @@ utils::error::Result<quint32> LayerFile::binaryDataOffset() noexcept
         return LINGLONG_ERR(size);
     }
 
-    return magicNumber.size() + *size + sizeof(quint32);
+    const auto &number = magicNumber();
+    return number.size() + *size + sizeof(quint32);
 }
 
 utils::error::Result<void> LayerFile::saveTo(const QString &destination) noexcept
 {
-    LINGLONG_TRACE(QString("save layer file to %1").arg(destination));
+    LINGLONG_TRACE(fmt::format("save layer file to {}", destination.toStdString()));
 
     if (!this->copy(destination)) {
-        return LINGLONG_ERR(*this);
+        return LINGLONG_ERR(this->errorString().toStdString());
     }
 
     return LINGLONG_OK;

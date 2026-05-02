@@ -16,10 +16,12 @@ usr/libexec/linglong/ll-session-helper
 usr/libexec/linglong/ld-cache-generator
 usr/libexec/linglong/font-cache-generator
 usr/libexec/linglong/ll-dialog
+usr/libexec/linglong/ll-driver-detect
 usr/libexec/linglong/dialog/99-linglong-permission
 usr/libexec/linglong/ll-init
 usr/share/bash-completion/completions/ll-cli
 usr/share/zsh/vendor-completions/_ll-cli
+usr/share/fish/vendor_completions.d/ll-cli.fish
 usr/share/dbus-1/system-services/org.deepin.linglong.PackageManager1.service
 usr/share/dbus-1/system.d/org.deepin.linglong.PackageManager1.conf
 usr/share/linglong/config.yaml
@@ -28,3 +30,4 @@ usr/share/locale
 usr/share/mime/packages/vnd.linyaps.uab.xml
 usr/share/polkit-1/actions/org.deepin.linglong.PackageManager1.policy
 usr/share/applications/linyaps.desktop
+usr/share/icons/hicolor/scalable/apps/linyaps.svg

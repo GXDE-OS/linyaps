@@ -26,6 +26,7 @@
 #include "linglong/api/types/v1/CommonOptions.hpp"
 #include "linglong/api/types/v1/CommonResult.hpp"
 #include "linglong/api/types/v1/ContainerProcessStateInfo.hpp"
+#include "linglong/api/types/v1/DeviceNode.hpp"
 #include "linglong/api/types/v1/DialogHandShakePayload.hpp"
 #include "linglong/api/types/v1/DialogMessage.hpp"
 #include "linglong/api/types/v1/ExportDirs.hpp"
@@ -55,6 +56,7 @@
 #include "linglong/api/types/v1/RepoConfig.hpp"
 #include "linglong/api/types/v1/RepoConfigV2.hpp"
 #include "linglong/api/types/v1/RepositoryCache.hpp"
+#include "linglong/api/types/v1/RuntimeConfigure.hpp"
 #include "linglong/api/types/v1/UabMetaInfo.hpp"
 #include "linglong/api/types/v1/UpgradeListResult.hpp"
 #include "linglong/api/types/v1/XdgDirectoryPermission.hpp"
@@ -65,7 +67,6 @@ namespace types {
 namespace v1 {
 enum class InteractionMessageType : int;
 enum class State : int;
-enum class SubState : int;
 }
 }
 }
@@ -96,6 +97,7 @@ std::optional<CliContainer> cliContainer;
 std::optional<CommonOptions> commonOptions;
 std::optional<CommonResult> commonResult;
 std::optional<ContainerProcessStateInfo> containerProcessStateInfo;
+std::optional<DeviceNode> deviceNode;
 std::optional<DialogHandShakePayload> dialogHandShakePayload;
 std::optional<DialogMessage> dialogMessage;
 std::optional<ExportDirs> exportDirs;
@@ -128,8 +130,8 @@ std::optional<Repo> repo;
 std::optional<RepoConfig> repoConfig;
 std::optional<RepoConfigV2> repoConfigV2;
 std::optional<RepositoryCache> repositoryCache;
+std::optional<RuntimeConfigure> runtimeConfigure;
 std::optional<State> state;
-std::optional<SubState> subState;
 std::optional<UabMetaInfo> uabMetaInfo;
 std::optional<UpgradeListResult> upgradeListResult;
 std::optional<std::vector<XdgDirectoryPermission>> xdgDirectoryPermissions;

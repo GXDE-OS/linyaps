@@ -1,0 +1,53 @@
+// SPDX-FileCopyrightText: 2024 - 2026 UnionTech Software Technology Co., Ltd.
+//
+// SPDX-License-Identifier: LGPL-3.0-or-later
+#include <gtest/gtest.h>
+
+#include "common/tempdir.h"
+#include "linglong/builder/linglong_builder.h"
+#include "ocppi/cli/crun/Crun.hpp"
+
+#include <memory>
+
+namespace linglong::builder {
+class BuilderMock : public Builder
+{
+public:
+    using Builder::layerExportFilename;
+    using Builder::uabExportFilename;
+
+    BuilderMock()
+        : Builder(
+            std::nullopt, "", initTempRepo(), initTempContainerBuilder(), initBuilderConfig()) { };
+
+private:
+    static linglong::repo::OSTreeRepo &initTempRepo()
+    {
+        auto tempRepoConfig = api::types::v1::RepoConfigV2{
+            .defaultRepo = "stable",
+            .repos = { api::types::v1::Repo{ .name = "stable",
+                                             .priority = 0,
+                                             .url = "https://example.com/repo" } },
+            .version = 2,
+        };
+        static auto testDir = std::make_unique<TempDir>("linglong-builder-test-");
+        auto ret = linglong::repo::OSTreeRepo::create(testDir->path(), tempRepoConfig);
+        EXPECT_TRUE(ret.has_value()) << ret.error().message();
+        static linglong::repo::OSTreeRepo *repo = std::move(ret).value().release();
+        return *repo;
+    }
+
+    static linglong::runtime::ContainerBuilder &initTempContainerBuilder()
+    {
+        auto static tempCLI = ocppi::cli::crun::Crun::New(std::filesystem::current_path());
+        static linglong::runtime::ContainerBuilder cb(**tempCLI);
+        return cb;
+    }
+
+    static api::types::v1::BuilderConfig &initBuilderConfig()
+    {
+        auto static cfg = api::types::v1::BuilderConfig{ .repo = "", .version = 1 };
+        return cfg;
+    }
+};
+} // namespace linglong::builder

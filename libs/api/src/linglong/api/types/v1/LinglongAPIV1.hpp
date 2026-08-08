@@ -22,6 +22,7 @@
 #include "linglong/api/types/v1/ApplicationPermissionsRequest.hpp"
 #include "linglong/api/types/v1/BuilderConfig.hpp"
 #include "linglong/api/types/v1/BuilderProject.hpp"
+#include "linglong/api/types/v1/CdiDeviceEntry.hpp"
 #include "linglong/api/types/v1/CliContainer.hpp"
 #include "linglong/api/types/v1/CommonOptions.hpp"
 #include "linglong/api/types/v1/CommonResult.hpp"
@@ -36,6 +37,7 @@
 #include "linglong/api/types/v1/InteractionReply.hpp"
 #include "linglong/api/types/v1/InteractionRequest.hpp"
 #include "linglong/api/types/v1/LayerInfo.hpp"
+#include "linglong/api/types/v1/Mount.hpp"
 #include "linglong/api/types/v1/OciConfigurationPatch.hpp"
 #include "linglong/api/types/v1/PackageInfo.hpp"
 #include "linglong/api/types/v1/PackageInfoDisplay.hpp"
@@ -56,7 +58,9 @@
 #include "linglong/api/types/v1/RepoConfig.hpp"
 #include "linglong/api/types/v1/RepoConfigV2.hpp"
 #include "linglong/api/types/v1/RepositoryCache.hpp"
+#include "linglong/api/types/v1/RunContextConfig.hpp"
 #include "linglong/api/types/v1/RuntimeConfigure.hpp"
+#include "linglong/api/types/v1/TaskState.hpp"
 #include "linglong/api/types/v1/UabMetaInfo.hpp"
 #include "linglong/api/types/v1/UpgradeListResult.hpp"
 #include "linglong/api/types/v1/XdgDirectoryPermission.hpp"
@@ -94,6 +98,7 @@ std::optional<ApplicationConfigurationPermissions> applicationConfigurationPermi
 std::optional<ApplicationPermissionsRequest> applicationPermissionsRequest;
 std::optional<BuilderConfig> builderConfig;
 std::optional<BuilderProject> builderProject;
+std::optional<CdiDeviceEntry> cdiDeviceEntry;
 std::optional<CliContainer> cliContainer;
 std::optional<CommonOptions> commonOptions;
 std::optional<CommonResult> commonResult;
@@ -110,6 +115,7 @@ std::optional<InteractionMessageType> interactionMessageType;
 std::optional<InteractionReply> interactionReply;
 std::optional<InteractionRequest> interactionRequest;
 std::optional<LayerInfo> layerInfo;
+std::optional<Mount> mount;
 std::optional<OciConfigurationPatch> ociConfigurationPatch;
 std::optional<PackageInfo> packageInfo;
 std::optional<PackageInfoDisplay> packageInfoDisplay;
@@ -132,8 +138,10 @@ std::optional<Repo> repo;
 std::optional<RepoConfig> repoConfig;
 std::optional<RepoConfigV2> repoConfigV2;
 std::optional<RepositoryCache> repositoryCache;
+std::optional<RunContextConfig> runContextConfig;
 std::optional<RuntimeConfigure> runtimeConfigure;
 std::optional<State> state;
+std::optional<TaskState> taskState;
 std::optional<UabMetaInfo> uabMetaInfo;
 std::optional<UpgradeListResult> upgradeListResult;
 std::optional<std::vector<XdgDirectoryPermission>> xdgDirectoryPermissions;

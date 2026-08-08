@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 UnionTech Software Technology Co., Ltd.
+// SPDX-FileCopyrightText: 2025 - 2026 UnionTech Software Technology Co., Ltd.
 //
 // SPDX-License-Identifier: LGPL-3.0-or-later
 
@@ -146,12 +146,7 @@ utils::error::Result<void> UabInstallationAction::checkUABLayersConstrain(
             return LINGLONG_ERR(fuzzyRef);
         }
 
-        auto localRef = repo.clearReference(*fuzzyRef,
-                                            {
-                                              .forceRemote = false,
-                                              .fallbackToRemote = false,
-                                              .semanticMatching = false,
-                                            });
+        auto localRef = repo.clearReferenceLocal(*fuzzyRef);
 
         auto version = package::Version::parse(front.version);
         if (!version) {
@@ -288,9 +283,9 @@ utils::error::Result<void> UabInstallationAction::preInstall(PackageTask &task)
             .localRef = operation->oldRef->toString(),
             .remoteRef = operation->newRef->reference.toString()
         };
-        if (!pm.waitConfirm(task,
-                            api::types::v1::InteractionMessageType::Upgrade,
-                            additionalMessage)) {
+        if (!task.requestInteraction(api::types::v1::InteractionMessageType::Upgrade,
+                                     additionalMessage)) {
+            task.Cancel();
             return LINGLONG_ERR("action canceled");
         }
     }

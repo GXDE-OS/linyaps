@@ -37,6 +37,26 @@ TEST(StringsTest, Trim)
     EXPECT_EQ(trim("  hello  ", "."), "  hello  ");
 }
 
+TEST(StringsTest, TrimLeft)
+{
+    EXPECT_EQ(trim_left("  hello  "), "hello  ");
+    EXPECT_EQ(trim_left("hello  "), "hello  ");
+    EXPECT_EQ(trim_left("  "), "");
+    EXPECT_EQ(trim_left("", " "), "");
+    EXPECT_EQ(trim_left("...hello...", "."), "hello...");
+    EXPECT_EQ(trim_left("\t hello", " \t"), "hello");
+}
+
+TEST(StringsTest, TrimRight)
+{
+    EXPECT_EQ(trim_right("  hello  "), "  hello");
+    EXPECT_EQ(trim_right("  hello"), "  hello");
+    EXPECT_EQ(trim_right("  "), "");
+    EXPECT_EQ(trim_right("", " "), "");
+    EXPECT_EQ(trim_right("...hello...", "."), "...hello");
+    EXPECT_EQ(trim_right("hello \t", " \t"), "hello");
+}
+
 TEST(StringsTest, Split)
 {
     EXPECT_EQ(split("a,b,c", ',', splitOption::None),
@@ -55,6 +75,8 @@ TEST(StringsTest, Split)
     EXPECT_EQ(split("", ',', splitOption::SkipEmpty), std::vector<std::string_view>({}));
     EXPECT_EQ(split(",,", ',', splitOption::None), std::vector<std::string_view>({ "", "", "" }));
     EXPECT_EQ(split(",,", ',', splitOption::SkipEmpty), std::vector<std::string_view>({}));
+    EXPECT_EQ(split("a=", '=', splitOption::None), std::vector<std::string_view>({ "a", "" }));
+    EXPECT_EQ(split("a", '=', splitOption::None), std::vector<std::string_view>({ "a" }));
 }
 
 TEST(StringsTest, Join)

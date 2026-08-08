@@ -4,7 +4,6 @@ Priority: optional
 Maintainer: Deepin Packages Builder <packages@deepin.com>
 Build-Depends: cmake,
                debhelper-compat (= 12),
-               erofsfuse,
                intltool,
                libcli11-dev (>= 2.4.1) | hello,
                libcurl4-openssl-dev,
@@ -61,6 +60,7 @@ Depends: erofs-utils,
          uidmap
          ${misc:Depends},
          ${shlibs:Depends}
+Recommends: linglong-loader
 Suggests: devscripts
 Description: Linglong application building tools.
  ll-builder is a tool that makes it easy to build applications and dependencies.

@@ -24,6 +24,12 @@ std::filesystem::path getBundleDir(const std::string &containerId) noexcept
     return getRuntimeDir() / containerId;
 }
 
+std::filesystem::path getContainerCacheDir(const std::string &commit,
+                                           const std::string &containerId) noexcept
+{
+    return std::filesystem::path{ LINGLONG_ROOT } / "cache" / commit / containerId;
+}
+
 std::filesystem::path getUserCacheDir() noexcept
 {
     auto cacheDir = xdg::getXDGCacheHomeDir();

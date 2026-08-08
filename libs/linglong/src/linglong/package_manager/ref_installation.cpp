@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 UnionTech Software Technology Co., Ltd.
+// SPDX-FileCopyrightText: 2025 - 2026 UnionTech Software Technology Co., Ltd.
 //
 // SPDX-License-Identifier: LGPL-3.0-or-later
 
@@ -9,6 +9,7 @@
 #include "linglong/repo/ostree_repo.h"
 #include "linglong/utils/log/log.h"
 
+#include <algorithm>
 #include <chrono>
 #include <thread>
 
@@ -73,7 +74,7 @@ utils::error::Result<void> RefInstallationAction::doAction(PackageTask &task)
     mainTask = &task;
 
     DataMonitor monitor(5, 1, [this](DataMonitor &m) {
-        mainTask->updateMessage(
+        mainTask->updateStateMessage(
           fmt::format("{} {:>9}", taskMessage, fmt::format("[{}]", m.getHumanSpeed())));
     });
 
@@ -173,9 +174,9 @@ utils::error::Result<void> RefInstallationAction::preInstall(Task &task)
             .localRef = operation->oldRef->toString(),
             .remoteRef = operation->newRef->reference.toString()
         };
-        if (!pm.waitConfirm(*mainTask,
-                            api::types::v1::InteractionMessageType::Upgrade,
-                            additionalMessage)) {
+        if (!mainTask->requestInteraction(api::types::v1::InteractionMessageType::Upgrade,
+                                          additionalMessage)) {
+            mainTask->Cancel();
             return LINGLONG_ERR("action canceled");
         }
     }
@@ -197,10 +198,30 @@ utils::error::Result<void> RefInstallationAction::install(Task &task)
         return LINGLONG_ERR("no modules found");
     }
 
+    auto requestedModules = modules;
+    if ((operation.operation == ActionOperation::Upgrade
+         || operation.operation == ActionOperation::Downgrade)
+        && operation.oldRef) {
+        auto localModules = repo.getModuleList(*operation.oldRef);
+        for (const auto &module : localModules) {
+            if (std::find(requestedModules.begin(), requestedModules.end(), module)
+                == requestedModules.end()) {
+                requestedModules.emplace_back(module);
+            }
+        }
+    }
+
     auto installModules = std::vector<std::string>{};
-    for (const auto &module : modules) {
-        if (std::find(remoteModules.begin(), remoteModules.end(), module) != remoteModules.end()) {
+    auto appendInstallModule = [&installModules](const std::string &module) {
+        if (std::find(installModules.begin(), installModules.end(), module)
+            == installModules.end()) {
             installModules.emplace_back(module);
+        }
+    };
+
+    for (const auto &module : requestedModules) {
+        if (std::find(remoteModules.begin(), remoteModules.end(), module) != remoteModules.end()) {
+            appendInstallModule(module);
             continue;
         }
 
@@ -208,7 +229,7 @@ utils::error::Result<void> RefInstallationAction::install(Task &task)
         if (module == "binary"
             && std::find(remoteModules.begin(), remoteModules.end(), "runtime")
               != remoteModules.end()) {
-            installModules.emplace_back("runtime");
+            appendInstallModule("runtime");
             continue;
         }
     }
@@ -327,7 +348,7 @@ utils::error::Result<void> RefInstallationAction::install(Task &task)
         const auto &[refRepo, module, meta] = ref;
 
         taskMessage = fmt::format("Installing {}/{}", refRepo.reference.toString(), module);
-        task.updateMessage(taskMessage);
+        task.updateStateMessage(taskMessage);
 
         auto res = pm.installRefModule(task, refRepo, module);
         if (!res) {

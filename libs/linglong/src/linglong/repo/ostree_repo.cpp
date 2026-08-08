@@ -121,7 +121,7 @@ void progress_changed(OstreeAsyncProgress *progress, gpointer user_data)
     data->taskContext->reportDataArrived(bytes_transferred - data->last_bytes_transferred);
     data->last_bytes_transferred = bytes_transferred;
 
-    // report actual fetched and requestd data
+    // report actual fetched and requested data
     data->taskContext->reportDataHandled(fetched, requested);
 }
 
@@ -357,72 +357,6 @@ createOstreeRepo(const std::filesystem::path &location,
     return static_cast<OstreeRepo *>(g_steal_pointer(&ostreeRepo));
 }
 
-utils::error::Result<package::Reference> clearReferenceLocal(const RepoCache &cache,
-                                                             package::FuzzyReference fuzzy,
-                                                             bool semanticMatching = false) noexcept
-{
-    LINGLONG_TRACE("clear fuzzy reference locally");
-
-    // NOTE: ignore channel, two packages with the same version but different channels are not
-    // allowed to be installed
-    repoCacheQuery query;
-    query.id = fuzzy.id;
-    if (fuzzy.arch) {
-        query.architecture = fuzzy.arch->toString();
-    }
-    const auto availablePackage = cache.queryLayerItem(query);
-    if (availablePackage.empty()) {
-        return LINGLONG_ERR("package not found:" + fuzzy.toString(),
-                            utils::error::ErrorCode::AppNotFoundFromLocal);
-    }
-
-    std::optional<linglong::package::Version> version;
-    if (fuzzy.version && !fuzzy.version->empty()) {
-        auto ret = linglong::package::Version::parse(fuzzy.version.value());
-        if (!ret) {
-            return LINGLONG_ERR(ret);
-        }
-        version = *ret;
-    }
-
-    utils::error::Result<linglong::api::types::v1::RepositoryCacheLayersItem> foundRef =
-      LINGLONG_ERR("compatible layer not found", utils::error::ErrorCode::LayerCompatibilityError);
-    for (const auto &ref : availablePackage) {
-        // we should ignore deleted layers
-        if (ref.deleted && ref.deleted.value()) {
-            continue;
-        }
-
-        auto pkgVer = linglong::package::Version::parse(ref.info.version);
-        if (!pkgVer) {
-            LogE("internal error: broken data of repo cache: {}", ref.info.version);
-            return LINGLONG_ERR(pkgVer);
-        }
-
-        LogD("available layer {} found: {}", fuzzy.toString(), ref.info.version);
-        if (version) {
-            if (semanticMatching && pkgVer->semanticMatch(version->toString())) {
-                foundRef = ref;
-                break;
-            }
-            if (*pkgVer == version.value()) {
-                foundRef = ref;
-                break;
-            }
-            continue;
-        }
-
-        foundRef = ref;
-        break;
-    }
-
-    if (!foundRef) {
-        return LINGLONG_ERR(foundRef);
-    }
-
-    return package::Reference::fromPackageInfo(foundRef->info);
-}
-
 utils::error::Result<bool> semanticMatch(const package::FuzzyReference &fuzzy,
                                          const api::types::v1::PackageInfoV2 &record) noexcept
 {
@@ -453,50 +387,77 @@ utils::error::Result<bool> semanticMatch(const package::FuzzyReference &fuzzy,
     return true;
 }
 
-std::optional<package::Reference> matchReference(const api::types::v1::PackageInfoV2 &record,
-                                                 const package::FuzzyReference &fuzzy,
-                                                 const std::string &module) noexcept
-{
-    auto recordStr = nlohmann::json(record).dump();
-    if (fuzzy.channel && fuzzy.channel != record.channel) {
-        return std::nullopt;
-    }
-    if (fuzzy.id != record.id) {
-        return std::nullopt;
-    }
-    auto version = package::Version::parse(record.version);
-    if (!version) {
-        LogW("Ignore invalid package record {}: {}", recordStr, version.error());
-        return std::nullopt;
-    }
-    if (record.arch.empty()) {
-        LogW("Ignore empty arch package record {}", recordStr);
-        return std::nullopt;
-    }
-    if (module == "binary") {
-        if (record.packageInfoV2Module != "binary" && record.packageInfoV2Module != "runtime") {
-            return std::nullopt;
-        }
-    } else {
-        if (record.packageInfoV2Module != module) {
-            return std::nullopt;
-        }
-    }
-    auto arch = package::Architecture::parse(record.arch[0]);
-    if (!arch) {
-        LogW("Ignore invalid package record {}: {}", recordStr, arch.error());
-        return std::nullopt;
-    }
-
-    auto currentRef = package::Reference::create(record.channel, fuzzy.id, *version, *arch);
-    if (!currentRef) {
-        LogW("Ignore invalid package record {}: {}", recordStr, currentRef.error());
-        return std::nullopt;
-    }
-    return *currentRef;
-}
-
 } // namespace
+
+utils::error::Result<package::Reference> OSTreeRepo::clearReferenceLocal(
+  const package::FuzzyReference &fuzzy, bool semanticMatching) const noexcept
+{
+    LINGLONG_TRACE("clear fuzzy reference locally");
+
+    // NOTE: ignore channel, two packages with the same version but different channels are not
+    // allowed to be installed
+    repoCacheQuery query;
+    query.id = fuzzy.id;
+    if (fuzzy.arch) {
+        query.architecture = fuzzy.arch->toString();
+    }
+    const auto availablePackage = this->cache->queryLayerItem(query);
+    if (availablePackage.empty()) {
+        return LINGLONG_ERR("package not found:" + fuzzy.toString(),
+                            utils::error::ErrorCode::AppNotFoundFromLocal);
+    }
+
+    std::optional<linglong::package::Version> version;
+    if (fuzzy.version && !fuzzy.version->empty()) {
+        auto ret = linglong::package::Version::parse(fuzzy.version.value());
+        if (!ret) {
+            return LINGLONG_ERR(ret);
+        }
+        version = *ret;
+    }
+
+    utils::error::Result<linglong::api::types::v1::RepositoryCacheLayersItem> foundRef =
+      LINGLONG_ERR("compatible layer not found", utils::error::ErrorCode::LayerCompatibilityError);
+    for (const auto &ref : availablePackage) {
+        // we should ignore deleted layers
+        if (ref.deleted && ref.deleted.value()) {
+            continue;
+        }
+
+        auto pkgVer = linglong::package::Version::parse(ref.info.version);
+        if (!pkgVer) {
+            LogE("internal error: broken data of repo cache: {}", ref.info.version);
+            return LINGLONG_ERR(pkgVer);
+        }
+
+        if (version) {
+            if (semanticMatching && pkgVer->semanticMatch(version->toString())) {
+                foundRef = ref;
+                break;
+            }
+            if (*pkgVer == version.value()) {
+                foundRef = ref;
+                break;
+            }
+            continue;
+        }
+
+        foundRef = ref;
+        break;
+    }
+
+    if (!foundRef) {
+        return LINGLONG_ERR(foundRef);
+    }
+
+    auto ref = package::Reference::fromPackageInfo(foundRef->info);
+    if (!ref) {
+        return LINGLONG_ERR(ref);
+    }
+
+    LogD("clear fuzzy ref {} to {}", fuzzy.toString(), ref->toString());
+    return ref;
+}
 
 utils::error::Result<api::types::v1::PackageInfoV2> RefMetaData::getPackageInfo() const noexcept
 {
@@ -1347,7 +1308,7 @@ OSTreeRepo::getRefStatistics(const RefMetaData &meta) const noexcept
     }
     g_clear_error(&gErr);
 
-    RefStatistics stat = { 0 };
+    RefStatistics stat{};
 
 #if OSTREE_CHECK_VERSION(2020, 1)
     g_autoptr(GPtrArray) sizes = NULL;
@@ -1395,7 +1356,7 @@ GVariantBuilder OSTreeRepo::initOStreePullOptions(const std::string &ref) noexce
     std::array<const char *, 2> refs{ ref.c_str(), nullptr };
     GVariantBuilder builder;
     g_variant_builder_init(&builder, G_VARIANT_TYPE("a{sv}"));
-    std::string userAgent = "linglong/" LINGLONG_VERSION;
+    std::string userAgent = "linglong/" LINGLONG_VERSION_FULL;
     g_variant_builder_add(&builder,
                           "{s@v}",
                           "append-user-agent",
@@ -1522,97 +1483,6 @@ utils::error::Result<void> OSTreeRepo::pull(service::Task &taskContext,
     }
 
     return LINGLONG_OK;
-}
-
-utils::error::Result<package::Reference>
-OSTreeRepo::clearReference(const package::FuzzyReference &fuzzy,
-                           const clearReferenceOption &opts,
-                           const std::string &module,
-                           const std::optional<std::string> &repo) const noexcept
-{
-    LINGLONG_TRACE(fmt::format("clear fuzzy reference {}", fuzzy.toString()));
-
-    utils::error::Result<package::Reference> reference = LINGLONG_ERR("reference not exists");
-
-    if (!opts.forceRemote) {
-        reference = clearReferenceLocal(*cache, fuzzy, opts.semanticMatching);
-        if (reference) {
-            return reference;
-        }
-
-        if (!opts.fallbackToRemote) {
-            return LINGLONG_ERR(reference);
-        }
-
-        LogD("fallback to remote: {}", reference.error());
-    }
-
-    // TODO
-    // repo should not optional
-    api::types::v1::Repo remoteRepo = getDefaultRepo();
-
-    if (repo) {
-        auto repoRet = this->getRepoByAlias(*repo);
-        if (!repoRet) {
-            return LINGLONG_ERR(repoRet);
-        }
-        remoteRepo = *repoRet;
-    }
-
-    auto listRet = this->searchRemote(fuzzy, remoteRepo);
-    if (!listRet.has_value()) {
-        return LINGLONG_ERR("get ref list from remote " + listRet.error().message(),
-                            listRet.error().code());
-    }
-
-    std::optional<package::Version> fuzzyVersion;
-    auto list = std::move(listRet).value();
-    if (fuzzy.version) {
-        list = package::Version::filterByFuzzyVersion(list, *fuzzy.version);
-
-        auto fuzzyVerRet = linglong::package::Version::parse(*fuzzy.version);
-        if (!fuzzyVerRet) {
-            return LINGLONG_ERR(fuzzyVerRet);
-        }
-        fuzzyVersion = std::move(fuzzyVerRet).value();
-    }
-
-    for (const auto &record : list) {
-        auto currentRefRet = matchReference(record, fuzzy, module);
-        if (!currentRefRet) {
-            continue;
-        }
-
-        if (fuzzyVersion) {
-            // 语义化匹配最新的版本
-            if (opts.semanticMatching) {
-                if (!reference || currentRefRet->version > reference->version) {
-                    reference = *currentRefRet;
-                }
-                continue;
-            }
-
-            // 精确匹配版本
-            if (currentRefRet->version == *fuzzyVersion) {
-                reference = *currentRefRet;
-                break;
-            }
-            continue;
-        }
-
-        // 匹配最新版本
-        if (!reference || currentRefRet->version > reference->version) {
-            reference = *currentRefRet;
-        }
-    }
-
-    if (!reference) {
-        auto msg =
-          fmt::format("not found ref:{} module:{} from remote repo", fuzzy.toString(), module);
-        return LINGLONG_ERR(msg, utils::error::ErrorCode::AppNotFoundFromRemote);
-    }
-
-    return reference;
 }
 
 utils::error::Result<std::vector<api::types::v1::PackageInfoV2>>
@@ -1825,7 +1695,7 @@ OSTreeRepo::searchRemote(const package::FuzzyReference &fuzzyRef,
         pkgInfos.emplace_back(std::move(packageInfo));
     }
 
-    return std::move(pkgInfos);
+    return pkgInfos;
 }
 
 utils::error::Result<repo::RemotePackages>
@@ -2095,12 +1965,12 @@ utils::error::Result<void> OSTreeRepo::exportDir(const std::string &appID,
                 && common::strings::ends_with(target_path.string(), ".desktop")) {
                 auto desktopExists = false;
                 // 如果要导出的desktop已存在，则覆盖导出（无论是在default还是overlay中），避免桌面和任务栏的快捷方式失效
-                const std::string appDirs[] = { oldAppDir, newAppDir };
+                const std::array<std::string, 2> appDirs{ oldAppDir, newAppDir };
                 for (const auto &appDir : appDirs) {
                     // 如果目标文件存在，删除再导出
-                    std::filesystem::path linkpath =
+                    const std::filesystem::path linkpath =
                       target_path.string().replace(0, oldAppDir.string().length(), appDir);
-                    auto status = std::filesystem::symlink_status(linkpath, ec);
+                    std::ignore = std::filesystem::symlink_status(linkpath, ec);
                     if (!ec) {
                         desktopExists = true;
                         auto target = source_path.lexically_relative(linkpath.parent_path());
@@ -3160,7 +3030,7 @@ OSTreeRepo::latestLocalReference(const package::FuzzyReference &fuzzyRef) const 
 {
     LINGLONG_TRACE("get latest local reference");
 
-    auto ref = clearReferenceLocal(*cache, fuzzyRef, true);
+    auto ref = this->clearReferenceLocal(fuzzyRef, true);
     if (!ref) {
         return LINGLONG_ERR(ref);
     }

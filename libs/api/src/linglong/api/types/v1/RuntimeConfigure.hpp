@@ -18,6 +18,17 @@
 #include "linglong/api/types/v1/helper.hpp"
 
 #include "linglong/api/types/v1/ExtensionDefine.hpp"
+#include "linglong/api/types/v1/Mount.hpp"
+
+namespace linglong {
+namespace api {
+namespace types {
+namespace v1 {
+enum class DeviceOption : int;
+}
+}
+}
+}
 
 namespace linglong {
 namespace api {
@@ -37,11 +48,17 @@ using nlohmann::json;
 
 struct RuntimeConfigure {
 std::optional<std::vector<DeviceOption>> deviceMode;
+std::optional<std::vector<std::string>> devices;
+std::optional<bool> disableXdp;
+std::optional<bool> enableAtspi;
+std::optional<bool> enablePipewire;
 std::optional<std::map<std::string, std::string>> env;
 /**
 * external extension definitions to extend the component
 */
 std::optional<std::map<std::string, std::vector<ExtensionDefine>>> extDefs;
+std::optional<std::map<std::string, RuntimeConfigure>> instances;
+std::optional<std::vector<Mount>> mounts;
 };
 }
 }
